@@ -41,7 +41,29 @@ class RiskGate:
             self.consecutive_losses = 0
             logger.info("Daily PnL reset")
 
-    def check(self, signal: Signal, current_price: float = None) -> Tuple[bool, str]:
+    def sync_positions_from_exchange(self, exchange) -> int:
+        """Đồng bộ toàn bộ vị thế đang mở trên sàn vào RiskGate."""
+        try:
+            positions = exchange.get_positions()
+            self.open_positions.clear()
+
+            for p in positions:
+                size = abs(float(p.size or 0))
+                if size <= 0:
+                    continue
+
+                # Key phải giống format trong register_order
+                key = f"{p.symbol}_{p.side.value}"
+                self.open_positions[key] = p
+
+            count = len(self.open_positions)
+            logger.info(f"Synced {count} open positions from exchange")
+            return count
+        except Exception as e:
+            logger.error(f"Failed to sync positions: {e}")
+            return len(self.open_positions)
+
+    def check(self, signal: Signal, current_price: float = None, current_positions=None) -> Tuple[bool, str]:
         """
         Trả về (approved: bool, reason: str)
         """
@@ -61,6 +83,11 @@ class RiskGate:
         # 3. Max open positions
         if len(self.open_positions) >= self.cfg["max_open_positions"]:
             return False, "MAX_OPEN_POSITIONS"
+
+        # 3b. Symbol đã có vị thế trên sàn → không mở thêm
+        symbol_keys = [k for k in self.open_positions if k.startswith(signal.symbol + "_")]
+        if symbol_keys:
+            return False, f"EXCHANGE ALREADY HAS POSITION ({signal.symbol})"
 
         # 4. Duplicate protection
         key = f"{signal.symbol}_{signal.side.value}"

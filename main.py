@@ -43,6 +43,11 @@ def main():
 
     exchange = ExchangeWrapper(mode=mode, config=settings)
     risk_gate = RiskGate(risk_config=risk_cfg, equity=exchange.get_balance())
+
+    # Đồng bộ vị thế đang mở trên sàn ngay khi khởi động
+    synced = risk_gate.sync_positions_from_exchange(exchange)
+    logger.info(f"Startup sync: {synced} positions loaded from exchange")
+
     scanner = ScannerAgent(exchange, top_n=settings.get("top_n", 20), timeframes=settings.get("timeframes", ["15m", "1h"]))
 
     default_lev = int(risk_cfg.get("default_leverage", 5))
@@ -77,6 +82,9 @@ def main():
                 )
                 time.sleep(60)
                 continue
+
+            # Đồng bộ lại vị thế mỗi cycle
+            risk_gate.sync_positions_from_exchange(exchange)
 
             # 1. Scan
             raw_signals = scanner.scan()
@@ -133,19 +141,12 @@ def main():
             time.sleep(settings.get("scan_interval_seconds", 60))
 
     except KeyboardInterrupt:
-        logger.info("Shutting down (Ctrl+C)...")
-        try:
-            if mode != "paper":
-                exchange.flatten_all()
-        except Exception as e:
-            logger.warning(f"Flatten on shutdown failed (ignored): {e}")
+        # Ctrl+C: chỉ dừng bot, KHÔNG đóng vị thế
+        logger.info("Shutting down (Ctrl+C) – positions left open on exchange")
     except Exception as e:
         logger.exception(f"Fatal error: {e}")
         write_status(mode=mode, last_error=str(e)[:200], kill_switch=risk_gate.kill_switch)
-        try:
-            exchange.flatten_all()
-        except Exception as e2:
-            logger.warning(f"Flatten on error failed (ignored): {e2}")
+        # Không flatten khi lỗi code – chỉ flatten khi kill_switch
 
 
 if __name__ == "__main__":
