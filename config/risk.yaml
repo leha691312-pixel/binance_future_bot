@@ -1,0 +1,25 @@
+# ====================== RISK GATE (BẮT BUỘC) ======================
+max_position_pct: 0.05          # 5% equity tối đa mỗi position
+max_total_exposure_pct: 0.30    # 30% equity tổng
+max_open_positions: 5
+min_risk_reward: 1.8
+max_daily_loss_pct: 0.03        # 3% daily loss → kill switch
+max_drawdown_pct: 0.12          # 12% max DD → kill switch
+cooldown_seconds: 45            # chống spam lệnh cùng symbol
+max_leverage: 10
+
+# Position sizing
+risk_per_trade_pct: 0.01        # risk 1% equity mỗi trade
+atr_multiplier_sl: 1.5
+
+# Kill Switch conditions
+kill_on_consecutive_losses: 6
+kill_on_api_error_rate: 0.15
+kill_on_high_volatility_atr: 4.0  # ATR% > 4%
+
+# Anti-duplicate
+duplicate_window_seconds: 300
+
+# Paper / Testnet safety
+force_paper_on_startup: true
+require_manual_confirm_live: true

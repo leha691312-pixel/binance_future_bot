@@ -1,0 +1,43 @@
+# ====================== BOT SETTINGS ======================
+mode: testnet          # paper | testnet | live
+exchange: binanceusdm
+
+# Top N coins to scan
+top_n: 50
+scan_interval_seconds: 120
+timeframes: ["15m", "1h", "4h"]
+
+# Capital & Risk (override by risk.yaml)
+initial_capital: 1000
+quote_asset: USDT
+
+# API Keys (use .env in production)
+# BINANCE_API_KEY=
+# BINANCE_API_SECRET=
+# BINANCE_TESTNET_API_KEY=
+# BINANCE_TESTNET_API_SECRET=
+
+# Logging
+log_level: INFO
+log_file: logs/bot.log
+
+# Dashboard
+dashboard_port: 8501
+
+# Multi-agent
+use_redis: false
+redis_url: redis://localhost:6379/0
+
+# ML
+ml_enabled: true
+ml_model_path: data/models/signal_filter.joblib
+ml_retrain_days: 7
+
+# Backtest defaults
+backtest:
+  start: "2023-01-01"
+  end: "2025-12-31"
+  initial_capital: 10000
+  commission: 0.0004          # 0.04% taker
+  slippage: 0.0002            # 0.02%
+  leverage: 5
