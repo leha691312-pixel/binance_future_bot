@@ -1,6 +1,8 @@
 """
 Execution Agent - đặt lệnh entry + TP/SL tự động (Binance Futures)
-Bắt lỗi -4411 (TradFi-Perps agreement) và bỏ qua symbol đó.
+- Luôn set Isolated margin
+- Tự chọn leverage hợp lý (theo config + ATR% nếu có)
+- Bắt lỗi -4411 (TradFi-Perps agreement) và bỏ qua symbol đó.
 """
 from typing import Optional, Set
 from loguru import logger
@@ -10,12 +12,46 @@ from agents.risk_gate import RiskGate
 
 
 class ExecutionAgent:
-    def __init__(self, exchange: ExchangeWrapper, risk_gate: RiskGate, leverage: int = 5):
+    def __init__(
+        self,
+        exchange: ExchangeWrapper,
+        risk_gate: RiskGate,
+        default_leverage: int = 5,
+        max_leverage: int = 10,
+    ):
         self.exchange = exchange
         self.risk_gate = risk_gate
-        self.leverage = leverage
+        self.default_leverage = max(1, int(default_leverage))
+        self.max_leverage = max(self.default_leverage, int(max_leverage))
         # Symbol bị lỗi agreement / không trade được → skip trong session
         self.skip_symbols: Set[str] = set()
+
+    def _choose_leverage(self, signal: Signal) -> int:
+        """
+        Chọn leverage hợp lý:
+        - Base = default_leverage (config)
+        - Nếu stop distance % lớn (rủi ro cao) → giảm leverage
+        - Không vượt max_leverage
+        """
+        lev = self.default_leverage
+        try:
+            entry = float(signal.entry)
+            sl = float(signal.sl)
+            if entry > 0 and sl > 0:
+                stop_pct = abs(entry - sl) / entry * 100  # %
+                # stop rộng (> 2.5%) → giảm leverage
+                if stop_pct >= 4.0:
+                    lev = max(2, self.default_leverage // 3)
+                elif stop_pct >= 2.5:
+                    lev = max(3, self.default_leverage // 2)
+                elif stop_pct <= 0.6:
+                    # stop rất hẹp, có thể tăng nhẹ nhưng vẫn ≤ max
+                    lev = min(self.max_leverage, self.default_leverage + 2)
+        except Exception:
+            pass
+
+        lev = max(1, min(lev, self.max_leverage))
+        return lev
 
     def execute(self, signal: Signal) -> Optional[dict]:
         if signal.symbol in self.skip_symbols:
@@ -37,8 +73,11 @@ class ExecutionAgent:
             logger.error("Zero stop distance")
             return None
 
+        # Leverage hợp lý theo signal
+        leverage = self._choose_leverage(signal)
+
         size = risk_amount / stop_distance
-        max_notional = equity * self.risk_gate.cfg.get("max_position_pct", 0.05) * self.leverage
+        max_notional = equity * self.risk_gate.cfg.get("max_position_pct", 0.05) * leverage
         if size * signal.entry > max_notional:
             size = max_notional / signal.entry
 
@@ -50,7 +89,8 @@ class ExecutionAgent:
         side = "buy" if signal.side == Side.LONG else "sell"
 
         try:
-            self.exchange.set_leverage(signal.symbol, self.leverage)
+            # Luôn Isolated + set leverage trước khi vào lệnh
+            self.exchange.prepare_symbol(signal.symbol, leverage)
 
             order = self.exchange.create_order(
                 symbol=signal.symbol,
@@ -64,9 +104,9 @@ class ExecutionAgent:
             self.risk_gate.register_order(signal, order_id, size)
 
             logger.info(
-                f"EXECUTED {signal.side.value} {signal.symbol} size={size} "
+                f"EXECUTED {signal.side.value} {signal.symbol} size={size} lev={leverage}x "
                 f"entry≈{fill_price:.6f} SL={signal.sl:.6f} TP={signal.tp:.6f} "
-                f"strategy={signal.strategy}"
+                f"strategy={signal.strategy} | margin=ISOLATED"
             )
 
             sl_ok, tp_ok = self._place_protective_orders(signal, size, fill_price)
@@ -76,6 +116,8 @@ class ExecutionAgent:
                 "signal": signal.to_dict(),
                 "size": size,
                 "entry": fill_price,
+                "leverage": leverage,
+                "margin_mode": "isolated",
                 "sl_placed": sl_ok,
                 "tp_placed": tp_ok,
                 "status": "FILLED",

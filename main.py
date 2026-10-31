@@ -44,7 +44,17 @@ def main():
     exchange = ExchangeWrapper(mode=mode, config=settings)
     risk_gate = RiskGate(risk_config=risk_cfg, equity=exchange.get_balance())
     scanner = ScannerAgent(exchange, top_n=settings.get("top_n", 20), timeframes=settings.get("timeframes", ["15m", "1h"]))
-    executor = ExecutionAgent(exchange, risk_gate, leverage=5)
+
+    default_lev = int(risk_cfg.get("default_leverage", 5))
+    max_lev = int(risk_cfg.get("max_leverage", 10))
+    executor = ExecutionAgent(
+        exchange,
+        risk_gate,
+        default_leverage=default_lev,
+        max_leverage=max_lev,
+    )
+    logger.info(f"Execution leverage: default={default_lev}x | max={max_lev}x | margin=ISOLATED")
+
     ml_agent = MLAgent(settings.get("ml_model_path", "data/models/signal_filter.joblib"))
 
     logger.info("All agents ready. Starting main loop...")

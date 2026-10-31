@@ -6,7 +6,10 @@ min_risk_reward: 1.8
 max_daily_loss_pct: 0.03        # 3% daily loss → kill switch
 max_drawdown_pct: 0.12          # 12% max DD → kill switch
 cooldown_seconds: 45            # chống spam lệnh cùng symbol
-max_leverage: 10
+
+# Leverage
+default_leverage: 5             # leverage mặc định (hợp lý)
+max_leverage: 10                # trần leverage (bot không vượt quá)
 
 # Position sizing
 risk_per_trade_pct: 0.01        # risk 1% equity mỗi trade

@@ -273,15 +273,51 @@ class ExchangeWrapper:
         logger.info(f"[PAPER] Order filled: {symbol} {side} {amount} @ {fill_price:.6f}")
         return order
 
-    def set_leverage(self, symbol: str, leverage: int):
+    def set_leverage(self, symbol: str, leverage: int) -> bool:
+        """Set leverage cho symbol. Paper mode luôn OK."""
         if self.mode == Mode.PAPER:
             return True
         try:
-            self.exchange.set_leverage(leverage, symbol)
+            self.exchange.set_leverage(int(leverage), symbol)
+            logger.info(f"Leverage set: {symbol} → {leverage}x")
             return True
         except Exception as e:
-            logger.warning(f"Set leverage failed: {e}")
+            logger.warning(f"Set leverage failed {symbol}: {e}")
             return False
+
+    def set_margin_mode(self, symbol: str, mode: str = "isolated") -> bool:
+        """
+        Luôn dùng Isolated cho an toàn (mỗi position độc lập, không bị kéo theo position khác).
+        mode: 'isolated' | 'cross'
+        """
+        if self.mode == Mode.PAPER:
+            return True
+        mode = (mode or "isolated").lower()
+        if mode not in ("isolated", "cross"):
+            mode = "isolated"
+        try:
+            # ccxt: set_margin_mode(marginMode, symbol, params={})
+            self.exchange.set_margin_mode(mode, symbol)
+            logger.info(f"Margin mode set: {symbol} → {mode.upper()}")
+            return True
+        except Exception as e:
+            err = str(e).lower()
+            # Binance trả lỗi nếu đã đúng mode rồi → coi như OK
+            if "no need to change" in err or "already" in err or "margin type" in err:
+                logger.debug(f"Margin mode already {mode} for {symbol}")
+                return True
+            logger.warning(f"Set margin mode failed {symbol}: {e}")
+            return False
+
+    def prepare_symbol(self, symbol: str, leverage: int) -> bool:
+        """
+        Chuẩn bị symbol trước khi vào lệnh:
+        1. Set Isolated
+        2. Set leverage
+        """
+        ok_margin = self.set_margin_mode(symbol, "isolated")
+        ok_lev = self.set_leverage(symbol, leverage)
+        return ok_margin and ok_lev
 
     def cancel_all_orders(self, symbol: str = None):
         if self.mode == Mode.PAPER:
