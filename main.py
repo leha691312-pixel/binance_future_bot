@@ -10,6 +10,7 @@ from loguru import logger
 
 from utils.logger import setup_logger
 from utils.status_writer import write_status
+from utils.order_logger import OrderLogger
 from core.exchange import ExchangeWrapper
 from agents.risk_gate import RiskGate
 from agents.scanner import ScannerAgent
@@ -44,11 +45,18 @@ def main():
     exchange = ExchangeWrapper(mode=mode, config=settings)
     risk_gate = RiskGate(risk_config=risk_cfg, equity=exchange.get_balance())
 
+    # Logger Excel cho mọi lệnh OPEN / CLOSE
+    order_logger = OrderLogger(path="data/orders.xlsx")
+
     # Đồng bộ vị thế đang mở trên sàn ngay khi khởi động
     synced = risk_gate.sync_positions_from_exchange(exchange)
     logger.info(f"Startup sync: {synced} positions loaded from exchange")
 
-    scanner = ScannerAgent(exchange, top_n=settings.get("top_n", 20), timeframes=settings.get("timeframes", ["15m", "1h"]))
+    scanner = ScannerAgent(
+        exchange,
+        top_n=settings.get("top_n", 20),
+        timeframes=settings.get("timeframes", ["15m", "1h"]),
+    )
 
     default_lev = int(risk_cfg.get("default_leverage", 5))
     max_lev = int(risk_cfg.get("max_leverage", 10))
@@ -57,6 +65,7 @@ def main():
         risk_gate,
         default_leverage=default_lev,
         max_leverage=max_lev,
+        order_logger=order_logger,
     )
     logger.info(f"Execution leverage: default={default_lev}x | max={max_lev}x | margin=ISOLATED")
 
@@ -83,7 +92,13 @@ def main():
                 time.sleep(60)
                 continue
 
-            # Đồng bộ lại vị thế mỗi cycle
+            # === QUAN TRỌNG: phát hiện vị thế đã chạm TP/SL ===
+            # 1) So sánh với bản ghi cũ → đóng + hủy SL/TP còn lại + ghi PnL/Excel
+            closed = risk_gate.handle_closed_positions(exchange, order_logger)
+            if closed:
+                logger.info(f"Handled {closed} closed position(s) this cycle")
+
+            # 2) Sync lại vị thế còn mở
             risk_gate.sync_positions_from_exchange(exchange)
 
             # 1. Scan
@@ -135,7 +150,7 @@ def main():
 
             logger.info(
                 f"Cycle done | raw={len(raw_signals)} | filtered={len(signals)} | "
-                f"executed={executed} | risk={risk_gate.status()}"
+                f"executed={executed} | closed={closed} | risk={risk_gate.status()}"
             )
 
             time.sleep(settings.get("scan_interval_seconds", 60))
@@ -146,7 +161,6 @@ def main():
     except Exception as e:
         logger.exception(f"Fatal error: {e}")
         write_status(mode=mode, last_error=str(e)[:200], kill_switch=risk_gate.kill_switch)
-        # Không flatten khi lỗi code – chỉ flatten khi kill_switch
 
 
 if __name__ == "__main__":
