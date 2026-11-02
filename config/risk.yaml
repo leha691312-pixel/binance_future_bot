@@ -1,34 +1,30 @@
 # ====================== RISK GATE (BẮT BUỘC) ======================
-max_position_pct: 0.05          # 5% equity tối đa mỗi position
-max_total_exposure_pct: 0.30    # 30% equity tổng
+max_position_pct: 0.05
+max_total_exposure_pct: 0.30
 max_open_positions: 5
 min_risk_reward: 1.8
-max_daily_loss_pct: 0.03        # 3% daily loss → kill switch
-max_drawdown_pct: 0.12          # 12% max DD → kill switch
-cooldown_seconds: 45            # chống spam lệnh cùng symbol
+max_daily_loss_pct: 0.03
+max_drawdown_pct: 0.12
+cooldown_seconds: 45
 
-# Leverage
-default_leverage: 5             # leverage mặc định (hợp lý)
-max_leverage: 10                # trần leverage (bot không vượt quá)
+default_leverage: 5
+max_leverage: 10
 
-# Position sizing
-risk_per_trade_pct: 0.01        # risk 1% equity mỗi trade
+risk_per_trade_pct: 0.01
 atr_multiplier_sl: 1.5
 
-# Kill Switch conditions
 kill_on_consecutive_losses: 6
 kill_on_api_error_rate: 0.15
-kill_on_high_volatility_atr: 4.0  # ATR% > 4%
+kill_on_high_volatility_atr: 4.0
 
-# Anti-duplicate
 duplicate_window_seconds: 300
 
-# ====================== INVALIDATION / ĐẢO CHIỀU ======================
+# ====================== INVALIDATION ======================
 invalidation_lookback_candles: 12
 min_remaining_rr: 0.4
 max_adverse_pct: 1.5
 bos_buffer_pct: 0.15
-max_hold_minutes: 360           # fallback
+max_hold_minutes: 360
 
 hold_profiles:
   scalp:
@@ -38,7 +34,6 @@ hold_profiles:
   swing:
     max_hold_minutes: 2880
 
-# Map đúng tên strategy (khớp Signal.strategy)
 strategy_trade_style:
   ORB: scalp
   LiquiditySweep: scalp
@@ -47,7 +42,10 @@ strategy_trade_style:
   FVG: day
   BOS_CHOCH: day
   OI_Funding: swing
+  TrendMA: day
+  MomentumRSI: day
+  PullbackEMA: day
+  RangeBounce: day
 
-# Paper / Testnet safety
 force_paper_on_startup: true
 require_manual_confirm_live: true
