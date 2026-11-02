@@ -10,6 +10,10 @@ from .trend_ma import TrendMAStrategy
 from .momentum_rsi import MomentumRSIStrategy
 from .pullback_ema import PullbackEMAStrategy
 from .range_bounce import RangeBounceStrategy
+from .ma_ribbon import MARibbonStrategy
+from .stoch_bb import StochBBStrategy
+from .pivot_scalp import PivotScalpStrategy
+from .ema_rsi_scalp import EMARSIScalpStrategy
 from .base import BaseStrategy
 
 STRATEGY_MAP = {
@@ -20,11 +24,15 @@ STRATEGY_MAP = {
     "FVG": FVGStrategy,
     "BOS_CHOCH": BOSCHOCHStrategy,
     "OI_Funding": OIFundingStrategy,
-    # Sarwa-style classic day trading
     "TrendMA": TrendMAStrategy,
     "MomentumRSI": MomentumRSIStrategy,
     "PullbackEMA": PullbackEMAStrategy,
     "RangeBounce": RangeBounceStrategy,
+    # Investopedia scalping
+    "MARibbon": MARibbonStrategy,
+    "StochBB": StochBBStrategy,
+    "PivotScalp": PivotScalpStrategy,
+    "EMARSIScalp": EMARSIScalpStrategy,
 }
 
 STRATEGY_ALIASES = {
@@ -58,6 +66,18 @@ STRATEGY_ALIASES = {
     "range": "RangeBounce",
     "range_bounce": "RangeBounce",
     "rangebounce": "RangeBounce",
+    "ma_ribbon": "MARibbon",
+    "maribbon": "MARibbon",
+    "ribbon": "MARibbon",
+    "stoch_bb": "StochBB",
+    "stochbb": "StochBB",
+    "stochastic": "StochBB",
+    "pivot": "PivotScalp",
+    "pivot_scalp": "PivotScalp",
+    "pivotscalp": "PivotScalp",
+    "ema_rsi_scalp": "EMARSIScalp",
+    "emarsiscalp": "EMARSIScalp",
+    "ema_scalp": "EMARSIScalp",
 }
 
 
