@@ -108,7 +108,7 @@ class ExchangeWrapper:
         except Exception:
             return {}
 
-        def _is_tradable_market(self, market: dict, quote: str = "USDT") -> bool:
+    def _is_tradable_market(self, market: dict, quote: str = "USDT") -> bool:
         """Chỉ nhận perpetual USDT đang active + status TRADING."""
         if not market or not isinstance(market, dict):
             return False
