@@ -1,6 +1,7 @@
 """
 Main Orchestrator - Multi-agent trading bot
 Modes: paper | testnet | live
+Discord control: set DISCORD_BOT_TOKEN + DISCORD_ALLOWED_IDS in .env
 """
 import time
 import yaml
@@ -16,6 +17,7 @@ from agents.risk_gate import RiskGate
 from agents.scanner import ScannerAgent
 from agents.execution import ExecutionAgent
 from agents.ml_agent import MLAgent
+from agents.discord_control import control_state, start_discord_in_thread
 
 load_dotenv()
 
@@ -45,10 +47,8 @@ def main():
     exchange = ExchangeWrapper(mode=mode, config=settings)
     risk_gate = RiskGate(risk_config=risk_cfg, equity=exchange.get_balance())
 
-    # Logger Excel cho mọi lệnh OPEN / CLOSE
     order_logger = OrderLogger(path="data/orders.xlsx")
 
-    # Đồng bộ vị thế đang mở trên sàn ngay khi khởi động
     synced = risk_gate.sync_positions_from_exchange(exchange)
     logger.info(f"Startup sync: {synced} positions loaded from exchange")
 
@@ -71,6 +71,10 @@ def main():
 
     ml_agent = MLAgent(settings.get("ml_model_path", "data/models/signal_filter.joblib"))
 
+    # Discord control (optional)
+    control_state.set_refs(risk_gate, executor, exchange, settings, risk_cfg, mode)
+    start_discord_in_thread()
+
     logger.info("All agents ready. Starting main loop...")
 
     try:
@@ -92,29 +96,41 @@ def main():
                 time.sleep(60)
                 continue
 
-            # === QUAN TRỌNG: phát hiện vị thế đã chạm TP/SL ===
-            # 1) So sánh với bản ghi cũ → đóng + hủy SL/TP còn lại + ghi PnL/Excel
+            # Pause từ Discord: vẫn monitor closed positions, không scan/execute
+            if control_state.paused:
+                closed = risk_gate.handle_closed_positions(exchange, order_logger)
+                risk_gate.sync_positions_from_exchange(exchange)
+                control_state.last_cycle_info = f"PAUSED | closed={closed}"
+                write_status(
+                    mode=mode,
+                    kill_switch=False,
+                    equity=risk_gate.equity,
+                    daily_pnl=risk_gate.daily_pnl,
+                    open_positions=len(risk_gate.open_positions),
+                    note="paused_via_discord",
+                )
+                time.sleep(settings.get("scan_interval_seconds", 60))
+                continue
+
             closed = risk_gate.handle_closed_positions(exchange, order_logger)
             if closed:
                 logger.info(f"Handled {closed} closed position(s) this cycle")
 
-            # 2) Sync lại vị thế còn mở
             risk_gate.sync_positions_from_exchange(exchange)
 
-            # 1. Scan
-            raw_signals = scanner.scan()
+            # Cập nhật top_n nếu Discord đã chỉnh
+            if hasattr(scanner, "top_n"):
+                scanner.top_n = int(settings.get("top_n", scanner.top_n))
 
-            # 2. ML filter
+            raw_signals = scanner.scan()
             signals = ml_agent.filter(raw_signals)
 
-            # 3. Execute top signals
             executed = 0
             for sig in signals[:3]:
                 result = executor.execute(sig)
                 if result:
                     executed += 1
 
-            # Positions snapshot
             pos_list = []
             try:
                 for p in exchange.get_positions():
@@ -148,6 +164,11 @@ def main():
                 positions=pos_list,
             )
 
+            control_state.last_cycle_info = (
+                f"raw={len(raw_signals)} filtered={len(signals)} "
+                f"executed={executed} closed={closed}"
+            )
+
             logger.info(
                 f"Cycle done | raw={len(raw_signals)} | filtered={len(signals)} | "
                 f"executed={executed} | closed={closed} | risk={risk_gate.status()}"
@@ -156,7 +177,6 @@ def main():
             time.sleep(settings.get("scan_interval_seconds", 60))
 
     except KeyboardInterrupt:
-        # Ctrl+C: chỉ dừng bot, KHÔNG đóng vị thế
         logger.info("Shutting down (Ctrl+C) – positions left open on exchange")
     except Exception as e:
         logger.exception(f"Fatal error: {e}")
