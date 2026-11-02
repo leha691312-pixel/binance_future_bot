@@ -2,25 +2,30 @@
 mode: testnet          # paper | testnet | live
 exchange: binanceusdm
 
-# Top N coins to scan
 top_n: 50
 scan_interval_seconds: 120
 timeframes: ["15m", "1h", "4h"]
 
 # ====================== STRATEGIES ======================
-# SMC + Sarwa classic day trading (11 strategies)
 enabled_strategies:
+  # Scalp (SMC + Investopedia)
   - ORB
   - LiquiditySweep
+  - MARibbon
+  - StochBB
+  - PivotScalp
+  - EMARSIScalp
+  # Day (SMC + Sarwa)
   - OrderBlock
   - SupplyDemand
   - FVG
   - BOS_CHOCH
-  - OI_Funding
   - TrendMA
   - MomentumRSI
   - PullbackEMA
   - RangeBounce
+  # Swing
+  - OI_Funding
 
 strategy_params:
   ORB:
@@ -29,6 +34,26 @@ strategy_params:
   LiquiditySweep:
     lookback: 30
     rr: 2.0
+  MARibbon:
+    sma1: 5
+    sma2: 8
+    sma3: 13
+    rr: 1.8
+  StochBB:
+    k_period: 5
+    d_period: 3
+    bb_period: 13
+    bb_std: 3.0
+    rr: 1.6
+  PivotScalp:
+    left: 2
+    right: 2
+    rr: 1.6
+  EMARSIScalp:
+    ema_fast: 8
+    ema_slow: 21
+    rsi_period: 7
+    rr: 1.5
   OrderBlock:
     impulse_mult: 2.2
     rr: 2.5
@@ -68,27 +93,17 @@ strategy_params:
     rsi_high: 65
     rr: 1.8
 
-# Capital & Risk (override by risk.yaml)
 initial_capital: 1000
 quote_asset: USDT
-
-# Logging
 log_level: INFO
 log_file: logs/bot.log
-
-# Dashboard
 dashboard_port: 8501
-
-# Multi-agent
 use_redis: false
 redis_url: redis://localhost:6379/0
-
-# ML
 ml_enabled: true
 ml_model_path: data/models/signal_filter.joblib
 ml_retrain_days: 7
 
-# Backtest defaults
 backtest:
   start: "2023-01-01"
   end: "2025-12-31"
