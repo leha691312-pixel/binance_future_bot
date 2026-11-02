@@ -8,14 +8,14 @@ timeframes: ["15m", "1h", "4h"]
 
 # ====================== STRATEGIES ======================
 enabled_strategies:
-  # Scalp (SMC + Investopedia)
+  # Scalp
   - ORB
   - LiquiditySweep
   - MARibbon
   - StochBB
   - PivotScalp
   - EMARSIScalp
-  # Day (SMC + Sarwa)
+  # Day
   - OrderBlock
   - SupplyDemand
   - FVG
@@ -24,8 +24,12 @@ enabled_strategies:
   - MomentumRSI
   - PullbackEMA
   - RangeBounce
-  # Swing
+  # Swing (OI + Strike.money)
   - OI_Funding
+  - SwingMACross
+  - SwingRSI
+  - FibPullback
+  - BBSqueeze
 
 strategy_params:
   ORB:
@@ -92,6 +96,23 @@ strategy_params:
     rsi_low: 35
     rsi_high: 65
     rr: 1.8
+  SwingMACross:
+    ema_fast: 20
+    ema_slow: 50
+    rr: 2.5
+  SwingRSI:
+    rsi_period: 14
+    ema_trend: 50
+    rr: 2.5
+  FibPullback:
+    lookback: 60
+    levels: [0.382, 0.5, 0.618]
+    rr: 2.5
+  BBSqueeze:
+    bb_period: 20
+    bb_std: 2.0
+    squeeze_lookback: 40
+    rr: 2.5
 
 initial_capital: 1000
 quote_asset: USDT
