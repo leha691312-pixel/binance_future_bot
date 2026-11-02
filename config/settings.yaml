@@ -1,21 +1,18 @@
 # ====================== BOT SETTINGS ======================
-mode: testnet          # paper | testnet | live
+mode: testnet
 exchange: binanceusdm
 
 top_n: 50
 scan_interval_seconds: 120
 timeframes: ["15m", "1h", "4h"]
 
-# ====================== STRATEGIES ======================
 enabled_strategies:
-  # Scalp
   - ORB
   - LiquiditySweep
   - MARibbon
   - StochBB
   - PivotScalp
   - EMARSIScalp
-  # Day
   - OrderBlock
   - SupplyDemand
   - FVG
@@ -24,7 +21,6 @@ enabled_strategies:
   - MomentumRSI
   - PullbackEMA
   - RangeBounce
-  # Swing (OI + Strike.money)
   - OI_Funding
   - SwingMACross
   - SwingRSI
@@ -32,87 +28,25 @@ enabled_strategies:
   - BBSqueeze
 
 strategy_params:
-  ORB:
-    range_bars: 4
-    rr: 2.0
-  LiquiditySweep:
-    lookback: 30
-    rr: 2.0
-  MARibbon:
-    sma1: 5
-    sma2: 8
-    sma3: 13
-    rr: 1.8
-  StochBB:
-    k_period: 5
-    d_period: 3
-    bb_period: 13
-    bb_std: 3.0
-    rr: 1.6
-  PivotScalp:
-    left: 2
-    right: 2
-    rr: 1.6
-  EMARSIScalp:
-    ema_fast: 8
-    ema_slow: 21
-    rsi_period: 7
-    rr: 1.5
-  OrderBlock:
-    impulse_mult: 2.2
-    rr: 2.5
-  SupplyDemand:
-    rr: 2.0
-  FVG:
-    min_gap_pct: 0.0015
-    rr: 2.2
-  BOS_CHOCH:
-    swing_lookback: 5
-    rr: 2.3
-    use_choch: true
-    use_bos: true
-  OI_Funding:
-    funding_extreme: 0.0008
-    min_oi_change: 0.03
-    rr: 2.0
-  TrendMA:
-    ema_fast: 9
-    ema_slow: 21
-    adx_min: 25
-    rr: 2.0
-  MomentumRSI:
-    rsi_period: 14
-    rsi_mid: 50
-    adx_min: 20
-    rr: 2.0
-  PullbackEMA:
-    ema_fast: 21
-    ema_slow: 50
-    adx_min: 25
-    rr: 2.2
-  RangeBounce:
-    lookback: 40
-    adx_max: 22
-    rsi_low: 35
-    rsi_high: 65
-    rr: 1.8
-  SwingMACross:
-    ema_fast: 20
-    ema_slow: 50
-    rr: 2.5
-  SwingRSI:
-    rsi_period: 14
-    ema_trend: 50
-    rr: 2.5
-  FibPullback:
-    lookback: 60
-    levels: [0.382, 0.5, 0.618]
-    rr: 2.5
-  BBSqueeze:
-    bb_period: 20
-    bb_std: 2.0
-    squeeze_lookback: 40
-    rr: 2.5
+  ORB: {range_bars: 4, rr: 2.0}
+  LiquiditySweep: {lookback: 30, rr: 2.0}
+  MARibbon: {sma1: 5, sma2: 8, sma3: 13, rr: 1.8}
+  StochBB: {k_period: 5, d_period: 3, bb_period: 13, bb_std: 3.0, rr: 1.6}
+  PivotScalp: {left: 2, right: 2, rr: 1.6}
+  EMARSIScalp: {ema_fast: 8, ema_slow: 21, rsi_period: 7, rr: 1.5}
+  OrderBlock: {impulse_mult: 2.2, rr: 2.5}
+  SupplyDemand: {rr: 2.0}
+  FVG: {min_gap_pct: 0.0015, rr: 2.2}
+  BOS_CHOCH: {swing_lookback: 5, rr: 2.3, use_choch: true, use_bos: true}
+  OI_Funding: {funding_extreme: 0.0008, min_oi_change: 0.03, rr: 2.0}
+  TrendMA: {ema_fast: 9, ema_slow: 21, adx_min: 25, rr: 2.0}
+  MomentumRSI: {rsi_period: 14, rsi_mid: 50, adx_min: 20, rr: 2.0}
+  PullbackEMA: {ema_fast: 21, ema_slow: 50, adx_min: 25, rr: 2.2}
+  RangeBounce: {lookback: 40, adx_max: 22, rsi_low: 35, rsi_high: 65, rr: 1.8}
+  SwingMACross: {ema_fast: 20, ema_slow: 50, rr: 2.5}
+  SwingRSI: {rsi_period: 14, ema_trend: 50, rr: 2.5}
+  FibPullback: {lookback: 60, levels: [0.382, 0.5, 0.618], rr: 2.5}
+  BBSqueeze: {bb_period: 20, bb_std: 2.0, squeeze_lookback: 40, rr: 2.5}
 
 initial_capital: 1000
 quote_asset: USDT
@@ -121,9 +55,23 @@ log_file: logs/bot.log
 dashboard_port: 8501
 use_redis: false
 redis_url: redis://localhost:6379/0
+
+# ====================== ML ======================
 ml_enabled: true
 ml_model_path: data/models/signal_filter.joblib
-ml_retrain_days: 7
+ml_samples_path: data/models/train_samples.jsonl
+# Phase 1: true = chỉ gom sample, KHÔNG filter bằng model
+ml_collect_only: true
+ml_filter_enabled: true
+ml_min_samples: 80
+ml_retrain_every_new: 25
+ml_retrain_hours: 12
+ml_min_auc_deploy: 0.55
+ml_min_class_count: 20
+ml_fee_rate: 0.0004
+ml_min_r_multiple: 0.25
+ml_prob_threshold: 0.55
+ml_test_ratio: 0.25
 
 backtest:
   start: "2023-01-01"
