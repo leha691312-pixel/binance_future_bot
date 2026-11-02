@@ -96,11 +96,12 @@ def main():
                 time.sleep(60)
                 continue
 
-            # Pause từ Discord: vẫn monitor closed positions, không scan/execute
+            # Pause từ Discord: vẫn monitor closed + invalidation, không scan/execute
             if control_state.paused:
                 closed = risk_gate.handle_closed_positions(exchange, order_logger)
+                invalidated = risk_gate.monitor_invalidations(exchange, order_logger)
                 risk_gate.sync_positions_from_exchange(exchange)
-                control_state.last_cycle_info = f"PAUSED | closed={closed}"
+                control_state.last_cycle_info = f"PAUSED | closed={closed} invalidated={invalidated}"
                 write_status(
                     mode=mode,
                     kill_switch=False,
@@ -112,10 +113,17 @@ def main():
                 time.sleep(settings.get("scan_interval_seconds", 60))
                 continue
 
+            # 1. Vị thế đã chạm TP/SL trên sàn
             closed = risk_gate.handle_closed_positions(exchange, order_logger)
             if closed:
                 logger.info(f"Handled {closed} closed position(s) this cycle")
 
+            # 2. Invalidation / đảo chiều → đóng sớm
+            invalidated = risk_gate.monitor_invalidations(exchange, order_logger)
+            if invalidated:
+                logger.info(f"Invalidated & closed {invalidated} position(s) this cycle")
+
+            # 3. Đồng bộ lại
             risk_gate.sync_positions_from_exchange(exchange)
 
             # Cập nhật top_n nếu Discord đã chỉnh
@@ -166,12 +174,13 @@ def main():
 
             control_state.last_cycle_info = (
                 f"raw={len(raw_signals)} filtered={len(signals)} "
-                f"executed={executed} closed={closed}"
+                f"executed={executed} closed={closed} invalidated={invalidated}"
             )
 
             logger.info(
                 f"Cycle done | raw={len(raw_signals)} | filtered={len(signals)} | "
-                f"executed={executed} | closed={closed} | risk={risk_gate.status()}"
+                f"executed={executed} | closed={closed} | invalidated={invalidated} | "
+                f"risk={risk_gate.status()}"
             )
 
             time.sleep(settings.get("scan_interval_seconds", 60))
