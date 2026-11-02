@@ -24,12 +24,33 @@ kill_on_high_volatility_atr: 4.0  # ATR% > 4%
 duplicate_window_seconds: 300
 
 # ====================== INVALIDATION / ĐẢO CHIỀU ======================
-# Phát hiện lệnh hết hiệu lực → đóng sớm
 invalidation_lookback_candles: 12   # số nến 15m để tìm swing high/low
 min_remaining_rr: 0.4               # nếu RR còn lại < 0.4 → đóng
-max_hold_minutes: 360               # giữ tối đa 6 giờ
 max_adverse_pct: 1.5                # đi ngược entry > 1.5% → đóng
 bos_buffer_pct: 0.15                # buffer % khi check Break of Structure
+
+# Fallback nếu không classify được style
+max_hold_minutes: 360
+
+# Thời gian giữ tối đa theo kiểu giao dịch (phút)
+hold_profiles:
+  scalp:
+    max_hold_minutes: 45          # ~45 phút
+  day:
+    max_hold_minutes: 360         # 6 giờ (trong phiên)
+  swing:
+    max_hold_minutes: 2880        # 48 giờ (2 ngày)
+
+# Map strategy → trade style (ưu tiên cao hơn timeframe)
+# Tên strategy phải khớp với field strategy trong Signal (chữ thường khi so sánh)
+strategy_trade_style:
+  orb: scalp
+  liquidity_sweep: scalp
+  bos_choch: day
+  fvg: day
+  order_block: day
+  supply_demand: day
+  oi_funding: swing
 
 # Paper / Testnet safety
 force_paper_on_startup: true
