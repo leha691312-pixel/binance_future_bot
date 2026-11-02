@@ -3,9 +3,9 @@ Risk Gate - BẮT BUỘC trước mọi lệnh.
 Chống lệnh trùng, position size, RR, daily loss, kill switch.
 Theo dõi vị thế đóng (TP/SL) → ghi PnL + hủy lệnh còn lại.
 Phát hiện invalidation / đảo chiều → đóng sớm.
-max_hold_minutes tự điều chỉnh theo scalp / day trade / swing.
+max_hold_minutes + max positions theo scalp / day / swing.
 """
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Tuple, Optional, Any, List
 from loguru import logger
 from core.models import Signal, Side, Position
@@ -24,14 +24,13 @@ class RiskGate:
         self.daily_pnl = 0.0
         self.daily_reset_date = datetime.utcnow().date()
         self.open_positions: Dict[str, Position] = {}
-        self.recent_orders: Dict[str, datetime] = {}   # key = symbol_side
+        self.recent_orders: Dict[str, datetime] = {}
         self.consecutive_losses = 0
         self.kill_switch = False
         self.kill_reason = ""
         self.api_errors = 0
         self.api_calls = 0
-        # Lưu order_id SL/TP để hủy khi một bên khớp
-        self.protective_orders: Dict[str, Dict[str, str]] = {}  # key -> {sl_id, tp_id}
+        self.protective_orders: Dict[str, Dict[str, str]] = {}
 
         logger.info("RiskGate initialized")
 
@@ -47,7 +46,6 @@ class RiskGate:
             logger.info("Daily PnL reset")
 
     def sync_positions_from_exchange(self, exchange) -> int:
-        """Đồng bộ vị thế đang mở trên sàn (giữ metadata cũ nếu còn)."""
         try:
             positions = exchange.get_positions()
             current: Dict[str, Position] = {}
@@ -57,7 +55,6 @@ class RiskGate:
                 if size <= 0:
                     continue
                 key = f"{p.symbol}_{p.side.value}"
-                # Giữ strategy / sl / tp từ bản ghi cũ nếu có
                 old = self.open_positions.get(key)
                 if old:
                     p.strategy = old.strategy or p.strategy
@@ -73,22 +70,24 @@ class RiskGate:
                         p.timeframe = old.timeframe
                     if getattr(old, "trade_style", None):
                         p.trade_style = old.trade_style
+                # Nếu chưa có style (sync từ sàn), gán theo strategy/timeframe
+                if not getattr(p, "trade_style", None):
+                    p.trade_style = self._classify_trade_style(
+                        strategy=getattr(p, "strategy", "") or "",
+                        timeframe=getattr(p, "timeframe", "") or "",
+                    )
                 current[key] = p
 
             self.open_positions = current
             count = len(self.open_positions)
-            logger.info(f"Synced {count} open positions from exchange")
+            by = self.count_positions_by_style()
+            logger.info(f"Synced {count} positions | by style={by}")
             return count
         except Exception as e:
             logger.error(f"Failed to sync positions: {e}")
             return len(self.open_positions)
 
     def handle_closed_positions(self, exchange, order_logger=None) -> int:
-        """
-        Phát hiện vị thế đã đóng trên sàn (chạm TP/SL),
-        hủy lệnh bảo vệ còn lại, ghi PnL và Excel.
-        Gọi TRƯỚC sync_positions_from_exchange mỗi cycle.
-        """
         try:
             live = exchange.get_positions()
             live_keys = {f"{p.symbol}_{p.side.value}" for p in live if abs(float(p.size or 0)) > 0}
@@ -142,7 +141,6 @@ class RiskGate:
             return 0
 
     def _estimate_realized_pnl(self, exchange, pos: Position) -> float:
-        """Cố lấy realized PnL từ recent trades; fallback 0."""
         try:
             if getattr(exchange.mode, "value", "") == "paper":
                 return 0.0
@@ -174,31 +172,26 @@ class RiskGate:
             return 0.0
 
     # ------------------------------------------------------------------
-    # TRADE STYLE → max hold (scalp / day / swing)
+    # TRADE STYLE
     # ------------------------------------------------------------------
     def _classify_trade_style(self, strategy: str = "", timeframe: str = "") -> str:
-        """
-        Phân loại: scalp | day | swing
-        Ưu tiên map theo strategy, sau đó theo timeframe.
-        """
-        strategy = (strategy or "").lower().strip()
+        strategy_raw = (strategy or "").strip()
+        strategy = strategy_raw.lower()
         timeframe = (timeframe or "").lower().strip()
 
-        # 1) Map tường minh theo strategy (config)
         style_map = self.cfg.get("strategy_trade_style") or {}
-        if strategy in style_map:
-            return str(style_map[strategy]).lower()
+        # case-insensitive lookup
+        lower_map = {str(k).lower(): str(v).lower() for k, v in style_map.items()}
+        if strategy in lower_map:
+            return lower_map[strategy]
+        if strategy_raw in style_map:
+            return str(style_map[strategy_raw]).lower()
 
-        # Heuristic theo tên strategy
-        if any(k in strategy for k in ("orb", "opening", "scalp", "liquidity_sweep", "sweep")):
+        if any(k in strategy for k in ("orb", "opening", "scalp", "liquidity", "sweep")):
             return "scalp"
         if any(k in strategy for k in ("oi", "funding", "swing")):
             return "swing"
-        if any(k in strategy for k in ("bos", "choch", "fvg", "order_block", "ob", "supply", "demand")):
-            # phụ thuộc TF
-            pass
 
-        # 2) Theo timeframe
         tf_minutes = self._timeframe_to_minutes(timeframe)
         if tf_minutes <= 5:
             return "scalp"
@@ -224,10 +217,6 @@ class RiskGate:
         return 15
 
     def _resolve_max_hold_minutes(self, pos: Position) -> Tuple[int, str]:
-        """
-        Trả về (max_hold_minutes, trade_style).
-        Dùng profile trong risk.yaml, fallback default.
-        """
         style = (getattr(pos, "trade_style", None) or "").lower()
         if not style:
             style = self._classify_trade_style(
@@ -240,26 +229,36 @@ class RiskGate:
         max_min = profile.get("max_hold_minutes")
 
         if max_min is None:
-            # Fallback cứng
             defaults = {"scalp": 45, "day": 360, "swing": 2880}
             max_min = defaults.get(style, int(self.cfg.get("max_hold_minutes", 360)))
 
         return int(max_min), style
 
+    def count_positions_by_style(self) -> Dict[str, int]:
+        counts = {"scalp": 0, "day": 0, "swing": 0}
+        for pos in self.open_positions.values():
+            style = (getattr(pos, "trade_style", None) or "").lower()
+            if not style:
+                style = self._classify_trade_style(
+                    strategy=getattr(pos, "strategy", "") or "",
+                    timeframe=getattr(pos, "timeframe", "") or "",
+                )
+            if style not in counts:
+                style = "day"
+            counts[style] += 1
+        return counts
+
+    def _max_for_style(self, style: str) -> int:
+        per = self.cfg.get("max_positions_per_style") or {}
+        if style in per:
+            return int(per[style])
+        # fallback 5 theo yêu cầu
+        return int(per.get(style, 5))
+
     # ------------------------------------------------------------------
-    # INVALIDATION / TREND REVERSAL
+    # INVALIDATION
     # ------------------------------------------------------------------
     def check_invalidation(self, exchange, pos: Position) -> Tuple[bool, str]:
-        """
-        Kiểm tra vị thế còn hiệu lực không.
-        Trả về (should_close: bool, reason: str)
-
-        Các điều kiện:
-        1. Break of Structure ngược chiều
-        2. Remaining RR quá thấp
-        3. Thời gian giữ quá lâu (tự điều chỉnh theo scalp/day/swing)
-        4. Adverse move quá lớn
-        """
         try:
             symbol = pos.symbol
             side = pos.side
@@ -275,7 +274,6 @@ class RiskGate:
             adverse_pct = float(self.cfg.get("max_adverse_pct", 1.5))
             bos_buffer = float(self.cfg.get("bos_buffer_pct", 0.15)) / 100
 
-            # max hold tự động theo style
             max_hold_min, style = self._resolve_max_hold_minutes(pos)
 
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe="15m", limit=max(lookback + 5, 30))
@@ -287,7 +285,6 @@ class RiskGate:
             lows = [c[3] for c in ohlcv]
             current_price = closes[-1]
 
-            # --- 1. BOS reverse ---
             recent_high = max(highs[-lookback:-1]) if len(highs) > lookback else max(highs[:-1])
             recent_low = min(lows[-lookback:-1]) if len(lows) > lookback else min(lows[:-1])
 
@@ -298,7 +295,6 @@ class RiskGate:
                 if current_price > recent_high * (1 + bos_buffer):
                     return True, f"BOS_REVERSE_SHORT (price={current_price:.6f} > high={recent_high:.6f})"
 
-            # --- 2. Remaining RR ---
             risk = abs(entry - sl) if sl > 0 else 0
             if risk > 0 and tp > 0:
                 if side == Side.LONG:
@@ -309,16 +305,11 @@ class RiskGate:
                 if remaining_rr < min_remaining_rr:
                     return True, f"LOW_REMAINING_RR ({remaining_rr:.2f} < {min_remaining_rr})"
 
-            # --- 3. Timeout (adaptive) ---
             open_time = pos.open_time or datetime.utcnow()
             hold_min = (datetime.utcnow() - open_time).total_seconds() / 60
             if hold_min > max_hold_min:
-                return True, (
-                    f"TIMEOUT_{style.upper()} "
-                    f"({hold_min:.0f}min > {max_hold_min}min)"
-                )
+                return True, f"TIMEOUT_{style.upper()} ({hold_min:.0f}min > {max_hold_min}min)"
 
-            # --- 4. Adverse move ---
             if side == Side.LONG:
                 move_pct = (entry - current_price) / entry * 100
             else:
@@ -332,7 +323,6 @@ class RiskGate:
             return False, f"ERROR:{e}"
 
     def monitor_invalidations(self, exchange, order_logger=None) -> int:
-        """Duyệt open_positions, đóng sớm nếu invalidation."""
         closed = 0
         for key, pos in list(self.open_positions.items()):
             should_close, reason = self.check_invalidation(exchange, pos)
@@ -405,8 +395,23 @@ class RiskGate:
             self.activate_kill_switch("DAILY_LOSS_LIMIT")
             return False, "DAILY_LOSS_LIMIT"
 
-        if len(self.open_positions) >= self.cfg["max_open_positions"]:
+        # Tổng vị thế toàn bot
+        if len(self.open_positions) >= self.cfg.get("max_open_positions", 15):
             return False, "MAX_OPEN_POSITIONS"
+
+        # Limit theo style (scalp/day/swing) — mỗi loại tối đa 5
+        style = self._classify_trade_style(
+            strategy=signal.strategy or "",
+            timeframe=getattr(signal, "timeframe", "") or "",
+        )
+        by_style = self.count_positions_by_style()
+        max_style = self._max_for_style(style)
+        if by_style.get(style, 0) >= max_style:
+            return False, (
+                f"MAX_{style.upper()}_POSITIONS "
+                f"({by_style.get(style, 0)}>={max_style}) | "
+                f"scalp={by_style.get('scalp', 0)} day={by_style.get('day', 0)} swing={by_style.get('swing', 0)}"
+            )
 
         symbol_keys = [k for k in self.open_positions if k.startswith(signal.symbol + "_")]
         if symbol_keys:
@@ -478,9 +483,10 @@ class RiskGate:
                 "sl_id": sl_order_id or "",
                 "tp_id": tp_order_id or "",
             }
+        by = self.count_positions_by_style()
         logger.info(
             f"RiskGate registered: {key} size={size} | style={style} | "
-            f"max_hold={max_hold}min | tf={tf or 'n/a'}"
+            f"max_hold={max_hold}min | by_style={by}"
         )
 
     def close_position(self, key: str, pnl: float):
@@ -514,11 +520,13 @@ class RiskGate:
                 self.activate_kill_switch(f"HIGH_API_ERROR_RATE ({error_rate:.1%})")
 
     def status(self) -> dict:
+        by = self.count_positions_by_style()
         return {
             "kill_switch": self.kill_switch,
             "kill_reason": self.kill_reason,
             "daily_pnl": round(self.daily_pnl, 2),
             "open_positions": len(self.open_positions),
+            "positions_by_style": by,
             "consecutive_losses": self.consecutive_losses,
             "equity": self.equity,
         }
