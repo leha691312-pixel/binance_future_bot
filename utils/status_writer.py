@@ -5,7 +5,7 @@ Dashboard đọc file này để hiển thị real-time.
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 STATUS_PATH = Path("data/status.json")
@@ -26,7 +26,11 @@ def write_status(
     recent_signals: List[Dict] = None,
     positions: List[Dict] = None,
     last_error: str = "",
+    strategies: Optional[List[str]] = None,
+    ml: Optional[Dict[str, Any]] = None,
+    **kwargs,
 ):
+    """Ghi status.json. Nhận thêm strategies, ml và mọi kwargs khác để không lỗi khi main mở rộng."""
     STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -44,8 +48,15 @@ def write_status(
         "recent_signals": recent_signals or [],
         "positions": positions or [],
         "last_error": last_error,
+        "strategies": strategies or [],
+        "ml": ml or {},
     }
-    STATUS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Ghi thêm các field tùy chọn từ kwargs (paused, cycle_info, ...)
+    for k, v in kwargs.items():
+        if k not in data and v is not None:
+            data[k] = v
+
+    STATUS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 
 def read_status() -> Dict[str, Any]:
