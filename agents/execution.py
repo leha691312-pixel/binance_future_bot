@@ -1,10 +1,7 @@
 """
 Execution Agent - đặt lệnh entry + TP/SL tự động (Binance Futures)
-- Luôn set Isolated margin
-- Tự chọn leverage hợp lý
-- Bắt lỗi -4411 (TradFi-Perps agreement)
-- Ghi log Excel khi mở lệnh
-- Lưu ML features lúc mở (on_open)
+- Isolated margin + leverage hợp lý
+- ML on_open kèm risk_amount / notional để label R-multiple
 """
 from typing import Optional, Set, Tuple
 from loguru import logger
@@ -104,14 +101,29 @@ class ExecutionAgent:
                 tp_order_id=tp_id,
             )
 
-            # ML: lưu features lúc mở lệnh
             if self.ml_agent is not None:
                 try:
                     key = f"{signal.symbol}_{signal.side.value}"
                     df = self.ohlcv_cache.get(signal.symbol)
                     if df is None:
                         df = self.ohlcv_cache.get(f"{signal.symbol}_{signal.timeframe}")
-                    self.ml_agent.on_open(signal, df=df, key=key)
+                    notional = abs(fill_price * size)
+                    # risk thực tế sau khi size có thể bị cap
+                    actual_risk = abs(fill_price - float(signal.sl)) * size
+                    self.ml_agent.on_open(
+                        signal,
+                        df=df,
+                        key=key,
+                        trade_meta={
+                            "risk_amount": actual_risk or risk_amount,
+                            "notional": notional,
+                            "size": size,
+                            "entry": fill_price,
+                            "sl": float(signal.sl),
+                            "tp": float(signal.tp),
+                            "leverage": leverage,
+                        },
+                    )
                 except Exception as e:
                     logger.warning(f"ML on_open failed: {e}")
 
@@ -158,8 +170,7 @@ class ExecutionAgent:
             if "-4411" in err or "TradFi-Perps" in err or "agreement contract" in err.lower():
                 self.skip_symbols.add(signal.symbol)
                 logger.warning(
-                    f"Skip {signal.symbol}: cần ký TradFi-Perps agreement trên Binance. "
-                    f"Đã thêm vào skip list ({len(self.skip_symbols)} symbols)."
+                    f"Skip {signal.symbol}: cần ký TradFi-Perps agreement trên Binance."
                 )
                 return None
 
@@ -184,8 +195,7 @@ class ExecutionAgent:
     ) -> Tuple[bool, bool, str, str]:
         if self.exchange.mode == Mode.PAPER:
             logger.info(
-                f"[PAPER] Protective orders simulated | "
-                f"SL={signal.sl:.6f} TP={signal.tp:.6f} size={size}"
+                f"[PAPER] Protective orders simulated | SL={signal.sl:.6f} TP={signal.tp:.6f}"
             )
             key = f"{signal.symbol}_{signal.side.value}"
             if key in self.exchange.paper_positions:
@@ -210,7 +220,6 @@ class ExecutionAgent:
                 },
             )
             sl_id = str(sl_order.get("id", ""))
-            logger.info(f"SL placed: {signal.symbol} stop={signal.sl} id={sl_id}")
             sl_ok = True
         except Exception as e:
             logger.error(f"SL order FAILED {signal.symbol}: {e}")
@@ -223,10 +232,9 @@ class ExecutionAgent:
                     params={"stopPrice": float(signal.sl), "reduceOnly": True},
                 )
                 sl_id = str(sl_order.get("id", ""))
-                logger.info(f"SL placed (retry): {signal.symbol} id={sl_id}")
                 sl_ok = True
             except Exception as e2:
-                logger.error(f"SL retry also failed: {e2}")
+                logger.error(f"SL retry failed: {e2}")
 
         try:
             tp_order = self.exchange.create_order(
@@ -241,7 +249,6 @@ class ExecutionAgent:
                 },
             )
             tp_id = str(tp_order.get("id", ""))
-            logger.info(f"TP placed: {signal.symbol} stop={signal.tp} id={tp_id}")
             tp_ok = True
         except Exception as e:
             logger.error(f"TP order FAILED {signal.symbol}: {e}")
@@ -254,13 +261,8 @@ class ExecutionAgent:
                     params={"stopPrice": float(signal.tp), "reduceOnly": True},
                 )
                 tp_id = str(tp_order.get("id", ""))
-                logger.info(f"TP placed (retry): {signal.symbol} id={tp_id}")
                 tp_ok = True
             except Exception as e2:
-                logger.error(f"TP retry also failed: {e2}")
+                logger.error(f"TP retry failed: {e2}")
 
-        if not sl_ok or not tp_ok:
-            logger.warning(
-                f"Protective incomplete for {signal.symbol}: SL={sl_ok} TP={tp_ok}"
-            )
         return sl_ok, tp_ok, sl_id, tp_id
