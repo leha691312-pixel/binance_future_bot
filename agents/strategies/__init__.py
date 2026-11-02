@@ -6,6 +6,10 @@ from .supply_demand import SupplyDemandStrategy
 from .fvg import FVGStrategy
 from .bos_choch import BOSCHOCHStrategy
 from .oi_funding import OIFundingStrategy
+from .trend_ma import TrendMAStrategy
+from .momentum_rsi import MomentumRSIStrategy
+from .pullback_ema import PullbackEMAStrategy
+from .range_bounce import RangeBounceStrategy
 from .base import BaseStrategy
 
 STRATEGY_MAP = {
@@ -16,9 +20,13 @@ STRATEGY_MAP = {
     "FVG": FVGStrategy,
     "BOS_CHOCH": BOSCHOCHStrategy,
     "OI_Funding": OIFundingStrategy,
+    # Sarwa-style classic day trading
+    "TrendMA": TrendMAStrategy,
+    "MomentumRSI": MomentumRSIStrategy,
+    "PullbackEMA": PullbackEMAStrategy,
+    "RangeBounce": RangeBounceStrategy,
 }
 
-# Alias phổ biến (viết thường / viết tắt)
 STRATEGY_ALIASES = {
     "orb": "ORB",
     "liquidity_sweep": "LiquiditySweep",
@@ -37,6 +45,19 @@ STRATEGY_ALIASES = {
     "oi_funding": "OI_Funding",
     "oi": "OI_Funding",
     "funding": "OI_Funding",
+    "trend": "TrendMA",
+    "trend_ma": "TrendMA",
+    "trendma": "TrendMA",
+    "momentum": "MomentumRSI",
+    "momentum_rsi": "MomentumRSI",
+    "momentumrsi": "MomentumRSI",
+    "rsi": "MomentumRSI",
+    "pullback": "PullbackEMA",
+    "pullback_ema": "PullbackEMA",
+    "pullbackema": "PullbackEMA",
+    "range": "RangeBounce",
+    "range_bounce": "RangeBounce",
+    "rangebounce": "RangeBounce",
 }
 
 
@@ -54,11 +75,6 @@ def get_all_strategies(
     enabled: Optional[List[str]] = None,
     strategy_params: Optional[Dict[str, dict]] = None,
 ) -> List[BaseStrategy]:
-    """
-    Trả về list strategy đã khởi tạo.
-    - enabled: list tên strategy được bật (None = tất cả)
-    - strategy_params: {"FVG": {"rr": 2.5}, ...} override params từng strategy
-    """
     params = params or {}
     strategy_params = strategy_params or {}
 
