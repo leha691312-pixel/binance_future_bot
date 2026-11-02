@@ -1,8 +1,6 @@
 """
 Main Orchestrator - Multi-agent trading bot
-Modes: paper | testnet | live
-Discord control: set DISCORD_BOT_TOKEN + DISCORD_ALLOWED_IDS in .env
-ML: lưu feature khi mở, label theo PnL khi đóng, auto-retrain ≥50 samples
+ML: R-label, time-split, collect_only, deploy gate
 """
 import time
 import yaml
@@ -33,7 +31,6 @@ def load_config():
 
 
 def _attach_ml_close_hook(risk_gate: RiskGate, ml_agent: MLAgent):
-    """Mỗi lần close_position → ML on_close (label PnL) + maybe retrain."""
     orig = risk_gate.close_position
 
     def close_position(key: str, pnl: float):
@@ -45,12 +42,20 @@ def _attach_ml_close_hook(risk_gate: RiskGate, ml_agent: MLAgent):
                 "timeframe": getattr(pos, "timeframe", "") or "",
                 "trade_style": getattr(pos, "trade_style", "") or "",
                 "symbol": getattr(pos, "symbol", ""),
+                "size": float(getattr(pos, "size", 0) or 0),
+                "entry": float(getattr(pos, "entry_price", 0) or 0),
+                "sl": float(getattr(pos, "sl", 0) or 0),
             }
         orig(key, pnl)
         try:
             report = ml_agent.on_close(key, pnl, meta=meta)
-            if report and "error" not in report:
-                logger.info(f"ML retrain report: {report}")
+            if report:
+                if report.get("deployed"):
+                    logger.info(f"ML retrain DEPLOYED: {report}")
+                elif report.get("error"):
+                    logger.warning(f"ML retrain skipped: {report}")
+                else:
+                    logger.info(f"ML retrain report: {report}")
         except Exception as e:
             logger.warning(f"ML on_close hook failed: {e}")
 
@@ -66,7 +71,7 @@ def main():
     logger.info(f"=== Starting Bot in mode: {mode.upper()} ===")
 
     if mode == "live":
-        logger.warning("LIVE MODE – Real money at risk. Make sure you understand the risks.")
+        logger.warning("LIVE MODE – Real money at risk.")
         confirm = input("Type 'YES I UNDERSTAND' to continue: ")
         if confirm != "YES I UNDERSTAND":
             logger.info("Aborted.")
@@ -74,43 +79,43 @@ def main():
 
     exchange = ExchangeWrapper(mode=mode, config=settings)
     risk_gate = RiskGate(risk_config=risk_cfg, equity=exchange.get_balance())
-
     order_logger = OrderLogger(path="data/orders.xlsx")
 
     synced = risk_gate.sync_positions_from_exchange(exchange)
-    logger.info(f"Startup sync: {synced} positions loaded from exchange")
+    logger.info(f"Startup sync: {synced} positions")
 
     enabled = settings.get("enabled_strategies")
     if enabled is not None and len(enabled) == 0:
         enabled = None
-    strat_params = settings.get("strategy_params") or {}
 
     scanner = ScannerAgent(
         exchange,
         top_n=settings.get("top_n", 20),
         timeframes=settings.get("timeframes", ["15m", "1h"]),
         enabled_strategies=enabled,
-        strategy_params=strat_params,
+        strategy_params=settings.get("strategy_params") or {},
     )
-    logger.info(
-        f"Active strategies: {[s.name for s in scanner.strategies]} "
-        f"| available={list_strategy_names()}"
-    )
+    logger.info(f"Active strategies: {[s.name for s in scanner.strategies]}")
 
     ml_agent = MLAgent(
         model_path=settings.get("ml_model_path", "data/models/signal_filter.joblib"),
         samples_path=settings.get("ml_samples_path", "data/models/train_samples.jsonl"),
-        min_samples=int(settings.get("ml_min_samples", 50)),
-        retrain_every_new=int(settings.get("ml_retrain_every_new", 10)),
-        min_retrain_hours=float(settings.get("ml_retrain_hours", 6)),
+        min_samples=int(settings.get("ml_min_samples", 80)),
+        retrain_every_new=int(settings.get("ml_retrain_every_new", 25)),
+        min_retrain_hours=float(settings.get("ml_retrain_hours", 12)),
+        collect_only=bool(settings.get("ml_collect_only", True)),
+        filter_enabled=bool(settings.get("ml_filter_enabled", True)),
+        min_auc_deploy=float(settings.get("ml_min_auc_deploy", 0.55)),
+        min_class_count=int(settings.get("ml_min_class_count", 20)),
+        fee_rate=float(settings.get("ml_fee_rate", 0.0004)),
+        min_r_multiple=float(settings.get("ml_min_r_multiple", 0.25)),
+        prob_threshold=float(settings.get("ml_prob_threshold", 0.55)),
+        test_ratio=float(settings.get("ml_test_ratio", 0.25)),
     )
-    ml_agent._load_pending_into_memory()
     _attach_ml_close_hook(risk_gate, ml_agent)
     logger.info(f"ML status: {ml_agent.status()}")
 
-    # Cache OHLCV để lấy feature lúc execute (scanner có thể fill)
     ohlcv_cache: dict = {}
-
     default_lev = int(risk_cfg.get("default_leverage", 5))
     max_lev = int(risk_cfg.get("max_leverage", 10))
     executor = ExecutionAgent(
@@ -122,7 +127,6 @@ def main():
         ml_agent=ml_agent,
         ohlcv_cache=ohlcv_cache,
     )
-    logger.info(f"Execution leverage: default={default_lev}x | max={max_lev}x | margin=ISOLATED")
 
     control_state.set_refs(risk_gate, executor, exchange, settings, risk_cfg, mode)
     try:
@@ -158,25 +162,11 @@ def main():
                 invalidated = risk_gate.monitor_invalidations(exchange, order_logger)
                 risk_gate.sync_positions_from_exchange(exchange)
                 control_state.last_cycle_info = f"PAUSED | closed={closed} invalidated={invalidated}"
-                write_status(
-                    mode=mode,
-                    kill_switch=False,
-                    equity=risk_gate.equity,
-                    daily_pnl=risk_gate.daily_pnl,
-                    open_positions=len(risk_gate.open_positions),
-                    note="paused_via_discord",
-                )
                 time.sleep(settings.get("scan_interval_seconds", 60))
                 continue
 
             closed = risk_gate.handle_closed_positions(exchange, order_logger)
-            if closed:
-                logger.info(f"Handled {closed} closed position(s) this cycle")
-
             invalidated = risk_gate.monitor_invalidations(exchange, order_logger)
-            if invalidated:
-                logger.info(f"Invalidated & closed {invalidated} position(s) this cycle")
-
             risk_gate.sync_positions_from_exchange(exchange)
 
             if hasattr(scanner, "top_n"):
@@ -192,8 +182,6 @@ def main():
                     )
 
             raw_signals = scanner.scan()
-
-            # Cập nhật cache OHLCV từ scanner nếu có
             if hasattr(scanner, "last_dfs") and isinstance(scanner.last_dfs, dict):
                 ohlcv_cache.clear()
                 ohlcv_cache.update(scanner.last_dfs)
@@ -202,8 +190,7 @@ def main():
 
             executed = 0
             for sig in signals[:3]:
-                result = executor.execute(sig)
-                if result:
+                if executor.execute(sig):
                     executed += 1
 
             pos_list = []
@@ -221,9 +208,7 @@ def main():
             except Exception:
                 pass
 
-            recent = [s.to_dict() for s in signals[:15]]
             ml_st = ml_agent.status()
-
             write_status(
                 mode=mode,
                 kill_switch=risk_gate.kill_switch,
@@ -235,29 +220,20 @@ def main():
                 raw_signals=len(raw_signals),
                 filtered_signals=len(signals),
                 executed=executed,
-                skip_symbols=len(getattr(executor, "skip_symbols", [])),
-                recent_signals=recent,
+                recent_signals=[s.to_dict() for s in signals[:15]],
                 positions=pos_list,
                 strategies=[s.name for s in scanner.strategies],
                 ml=ml_st,
             )
 
-            control_state.last_cycle_info = (
-                f"raw={len(raw_signals)} filtered={len(signals)} "
-                f"executed={executed} closed={closed} invalidated={invalidated} "
-                f"ml_samples={ml_st.get('n_samples', 0)}"
-            )
-
             logger.info(
-                f"Cycle done | raw={len(raw_signals)} | filtered={len(signals)} | "
-                f"executed={executed} | closed={closed} | invalidated={invalidated} | "
-                f"ml={ml_st} | risk={risk_gate.status()}"
+                f"Cycle | raw={len(raw_signals)} filtered={len(signals)} "
+                f"exec={executed} closed={closed} inv={invalidated} ml={ml_st}"
             )
-
             time.sleep(settings.get("scan_interval_seconds", 60))
 
     except KeyboardInterrupt:
-        logger.info("Shutting down (Ctrl+C) – positions left open on exchange")
+        logger.info("Shutting down (Ctrl+C) – positions left open")
     except Exception as e:
         logger.exception(f"Fatal error: {e}")
         write_status(mode=mode, last_error=str(e)[:200], kill_switch=risk_gate.kill_switch)
