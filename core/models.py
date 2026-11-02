@@ -70,6 +70,8 @@ class Position:
     leverage: int = 1
     unrealized_pnl: float = 0.0
     status: OrderStatus = OrderStatus.OPEN
+    timeframe: str = ""         # TF lúc vào lệnh (15m, 1h, ...)
+    trade_style: str = ""       # scalp | day | swing (tự gán)
 
 @dataclass
 class TradeResult:
