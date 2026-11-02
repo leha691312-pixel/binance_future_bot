@@ -46,6 +46,7 @@ class MLAgent:
         strategy_map = {
             "ORB": 0.1, "LiquiditySweep": 0.2, "OrderBlock": 0.3,
             "SupplyDemand": 0.4, "FVG": 0.5, "BOS_CHOCH": 0.6, "OI_Funding": 0.7,
+            "TrendMA": 0.75, "MomentumRSI": 0.8, "PullbackEMA": 0.85, "RangeBounce": 0.9,
         }
         feats = [
             signal.confidence,
@@ -181,7 +182,7 @@ class MLAgent:
             conf = rng.uniform(0.55, 0.9)
             rr = rng.uniform(1.5, 3.5)
             is_long = float(rng.integers(0, 2))
-            strat_id = float(rng.choice([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]))
+            strat_id = float(rng.choice([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9]))
             body_ratio = rng.uniform(0.2, 0.9)
             atr_pct = rng.uniform(0.005, 0.04)
             vol_ratio = rng.uniform(0.6, 2.5)
