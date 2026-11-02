@@ -4,6 +4,7 @@ Execution Agent - đặt lệnh entry + TP/SL tự động (Binance Futures)
 - Tự chọn leverage hợp lý
 - Bắt lỗi -4411 (TradFi-Perps agreement)
 - Ghi log Excel khi mở lệnh
+- Lưu ML features lúc mở (on_open)
 """
 from typing import Optional, Set, Tuple
 from loguru import logger
@@ -20,12 +21,16 @@ class ExecutionAgent:
         default_leverage: int = 5,
         max_leverage: int = 10,
         order_logger=None,
+        ml_agent=None,
+        ohlcv_cache: dict = None,
     ):
         self.exchange = exchange
         self.risk_gate = risk_gate
         self.default_leverage = max(1, int(default_leverage))
         self.max_leverage = max(self.default_leverage, int(max_leverage))
         self.order_logger = order_logger
+        self.ml_agent = ml_agent
+        self.ohlcv_cache = ohlcv_cache if ohlcv_cache is not None else {}
         self.skip_symbols: Set[str] = set()
 
     def _choose_leverage(self, signal: Signal) -> int:
@@ -91,7 +96,6 @@ class ExecutionAgent:
             order_id = str(order.get("id", "paper"))
             fill_price = float(order.get("price") or order.get("average") or signal.entry)
 
-            # Đặt SL + TP và lấy order id
             sl_ok, tp_ok, sl_id, tp_id = self._place_protective_orders(signal, size, fill_price)
 
             self.risk_gate.register_order(
@@ -99,6 +103,17 @@ class ExecutionAgent:
                 sl_order_id=sl_id,
                 tp_order_id=tp_id,
             )
+
+            # ML: lưu features lúc mở lệnh
+            if self.ml_agent is not None:
+                try:
+                    key = f"{signal.symbol}_{signal.side.value}"
+                    df = self.ohlcv_cache.get(signal.symbol)
+                    if df is None:
+                        df = self.ohlcv_cache.get(f"{signal.symbol}_{signal.timeframe}")
+                    self.ml_agent.on_open(signal, df=df, key=key)
+                except Exception as e:
+                    logger.warning(f"ML on_open failed: {e}")
 
             logger.info(
                 f"EXECUTED {signal.side.value} {signal.symbol} size={size} lev={leverage}x "
@@ -167,7 +182,6 @@ class ExecutionAgent:
     def _place_protective_orders(
         self, signal: Signal, size: float, entry_price: float
     ) -> Tuple[bool, bool, str, str]:
-        """Trả về (sl_ok, tp_ok, sl_order_id, tp_order_id)"""
         if self.exchange.mode == Mode.PAPER:
             logger.info(
                 f"[PAPER] Protective orders simulated | "
