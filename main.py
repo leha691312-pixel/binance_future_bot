@@ -18,6 +18,7 @@ from agents.scanner import ScannerAgent
 from agents.execution import ExecutionAgent
 from agents.ml_agent import MLAgent
 from agents.discord_control import control_state, start_discord_in_thread
+from agents.strategies import list_strategy_names
 
 load_dotenv()
 
@@ -52,10 +53,23 @@ def main():
     synced = risk_gate.sync_positions_from_exchange(exchange)
     logger.info(f"Startup sync: {synced} positions loaded from exchange")
 
+    # ===== TẤT CẢ CHIẾN THUẬT =====
+    enabled = settings.get("enabled_strategies")  # None / [] / list names
+    if enabled is not None and len(enabled) == 0:
+        # rỗng = bật hết
+        enabled = None
+    strat_params = settings.get("strategy_params") or {}
+
     scanner = ScannerAgent(
         exchange,
         top_n=settings.get("top_n", 20),
         timeframes=settings.get("timeframes", ["15m", "1h"]),
+        enabled_strategies=enabled,
+        strategy_params=strat_params,
+    )
+    logger.info(
+        f"Active strategies: {[s.name for s in scanner.strategies]} "
+        f"| available={list_strategy_names()}"
     )
 
     default_lev = int(risk_cfg.get("default_leverage", 5))
@@ -73,6 +87,14 @@ def main():
 
     # Discord control (optional)
     control_state.set_refs(risk_gate, executor, exchange, settings, risk_cfg, mode)
+    # Cho Discord truy cập scanner để bật/tắt strategy
+    if hasattr(control_state, "scanner"):
+        control_state.scanner = scanner
+    else:
+        try:
+            control_state.scanner = scanner
+        except Exception:
+            pass
     start_discord_in_thread()
 
     logger.info("All agents ready. Starting main loop...")
@@ -126,9 +148,19 @@ def main():
             # 3. Đồng bộ lại
             risk_gate.sync_positions_from_exchange(exchange)
 
-            # Cập nhật top_n nếu Discord đã chỉnh
+            # Cập nhật top_n / strategies nếu Discord đã chỉnh
             if hasattr(scanner, "top_n"):
                 scanner.top_n = int(settings.get("top_n", scanner.top_n))
+            new_enabled = settings.get("enabled_strategies")
+            if new_enabled is not None:
+                current_names = [s.name for s in scanner.strategies]
+                # so sánh set
+                want = new_enabled if new_enabled else list_strategy_names()
+                if set(want) != set(current_names):
+                    scanner.reload_strategies(
+                        enabled=new_enabled if new_enabled else None,
+                        strategy_params=settings.get("strategy_params") or {},
+                    )
 
             raw_signals = scanner.scan()
             signals = ml_agent.filter(raw_signals)
@@ -170,6 +202,7 @@ def main():
                 skip_symbols=len(getattr(executor, "skip_symbols", [])),
                 recent_signals=recent,
                 positions=pos_list,
+                strategies=[s.name for s in scanner.strategies],
             )
 
             control_state.last_cycle_info = (
