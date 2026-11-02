@@ -23,12 +23,14 @@ class ScannerAgent:
         self.exchange = exchange
         self.top_n = top_n
         self.timeframes = timeframes or ["15m", "1h"]
-        self.enabled_strategies = enabled_strategies  # None = all
+        self.enabled_strategies = enabled_strategies
         self.strategy_params = strategy_params or {}
         self.strategies = get_all_strategies(
             enabled=enabled_strategies,
             strategy_params=strategy_params,
         )
+        # symbol -> df (TF ưu tiên cuối cùng quét) + symbol_tf -> df
+        self.last_dfs: Dict[str, pd.DataFrame] = {}
         names = [s.name for s in self.strategies]
         logger.info(
             f"ScannerAgent ready | Top {top_n} | TFs={self.timeframes} | "
@@ -40,7 +42,6 @@ class ScannerAgent:
         enabled: Optional[List[str]] = None,
         strategy_params: Optional[Dict[str, dict]] = None,
     ):
-        """Reload khi Discord/config đổi danh sách strategy."""
         if enabled is not None:
             self.enabled_strategies = enabled
         if strategy_params is not None:
@@ -57,6 +58,7 @@ class ScannerAgent:
 
         all_signals: List[Signal] = []
         per_strat: Counter = Counter()
+        self.last_dfs = {}
 
         for symbol in symbols:
             funding_rate = None
@@ -83,6 +85,8 @@ class ScannerAgent:
                         columns=["timestamp", "open", "high", "low", "close", "volume"],
                     )
                     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                    self.last_dfs[symbol] = df
+                    self.last_dfs[f"{symbol}_{tf}"] = df
 
                     for strat in self.strategies:
                         try:
