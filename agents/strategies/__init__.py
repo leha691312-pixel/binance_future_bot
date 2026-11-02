@@ -14,6 +14,10 @@ from .ma_ribbon import MARibbonStrategy
 from .stoch_bb import StochBBStrategy
 from .pivot_scalp import PivotScalpStrategy
 from .ema_rsi_scalp import EMARSIScalpStrategy
+from .swing_ma_cross import SwingMACrossStrategy
+from .swing_rsi import SwingRSIStrategy
+from .fib_pullback import FibPullbackStrategy
+from .bb_squeeze import BBSqueezeStrategy
 from .base import BaseStrategy
 
 STRATEGY_MAP = {
@@ -28,11 +32,15 @@ STRATEGY_MAP = {
     "MomentumRSI": MomentumRSIStrategy,
     "PullbackEMA": PullbackEMAStrategy,
     "RangeBounce": RangeBounceStrategy,
-    # Investopedia scalping
     "MARibbon": MARibbonStrategy,
     "StochBB": StochBBStrategy,
     "PivotScalp": PivotScalpStrategy,
     "EMARSIScalp": EMARSIScalpStrategy,
+    # Strike.money swing
+    "SwingMACross": SwingMACrossStrategy,
+    "SwingRSI": SwingRSIStrategy,
+    "FibPullback": FibPullbackStrategy,
+    "BBSqueeze": BBSqueezeStrategy,
 }
 
 STRATEGY_ALIASES = {
@@ -78,6 +86,17 @@ STRATEGY_ALIASES = {
     "ema_rsi_scalp": "EMARSIScalp",
     "emarsiscalp": "EMARSIScalp",
     "ema_scalp": "EMARSIScalp",
+    "swing_ma": "SwingMACross",
+    "swing_ma_cross": "SwingMACross",
+    "swingmacross": "SwingMACross",
+    "swing_rsi": "SwingRSI",
+    "swingrsi": "SwingRSI",
+    "fib": "FibPullback",
+    "fib_pullback": "FibPullback",
+    "fibpullback": "FibPullback",
+    "bb_squeeze": "BBSqueeze",
+    "bbsqueeze": "BBSqueeze",
+    "squeeze": "BBSqueeze",
 }
 
 
