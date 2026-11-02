@@ -2,9 +2,10 @@
 Risk Gate - BẮT BUỘC trước mọi lệnh.
 Chống lệnh trùng, position size, RR, daily loss, kill switch.
 Theo dõi vị thế đóng (TP/SL) → ghi PnL + hủy lệnh còn lại.
+Phát hiện invalidation / đảo chiều → đóng sớm.
 """
 from datetime import datetime, timedelta
-from typing import Dict, Tuple, Optional, Any
+from typing import Dict, Tuple, Optional, Any, List
 from loguru import logger
 from core.models import Signal, Side, Position
 import yaml
@@ -65,6 +66,8 @@ class RiskGate:
                         p.tp = old.tp
                     if old.order_id:
                         p.order_id = old.order_id
+                    if old.open_time:
+                        p.open_time = old.open_time
                 current[key] = p
 
             self.open_positions = current
@@ -144,7 +147,7 @@ class RiskGate:
     def _estimate_realized_pnl(self, exchange, pos: Position) -> float:
         """Cố lấy realized PnL từ recent trades; fallback 0."""
         try:
-            if exchange.mode.value == "paper":
+            if getattr(exchange.mode, "value", "") == "paper":
                 return 0.0
             if not getattr(exchange, "exchange", None):
                 return 0.0
@@ -153,17 +156,14 @@ class RiskGate:
             if not trades:
                 return 0.0
 
-            # Lấy trade reduce gần nhất cùng hướng đóng
             close_side = "sell" if pos.side == Side.LONG else "buy"
             for t in reversed(trades):
                 if str(t.get("side", "")).lower() != close_side:
                     continue
-                # ccxt đôi khi có info.realizedPnl
                 info = t.get("info") or {}
                 rpnl = info.get("realizedPnl") or info.get("realized_pnl") or t.get("realizedPnl")
                 if rpnl is not None:
                     return float(rpnl)
-                # Ước tính thô
                 price = float(t.get("price") or 0)
                 amount = float(t.get("amount") or 0)
                 if price > 0 and amount > 0 and pos.entry_price > 0:
@@ -175,6 +175,161 @@ class RiskGate:
         except Exception as e:
             logger.debug(f"Estimate PnL failed: {e}")
             return 0.0
+
+    # ------------------------------------------------------------------
+    # INVALIDATION / TREND REVERSAL
+    # ------------------------------------------------------------------
+    def check_invalidation(self, exchange, pos: Position) -> Tuple[bool, str]:
+        """
+        Kiểm tra vị thế còn hiệu lực không.
+        Trả về (should_close: bool, reason: str)
+
+        Các điều kiện:
+        1. Break of Structure ngược chiều (giá phá swing gần nhất)
+        2. Remaining RR quá thấp (< min_remaining_rr)
+        3. Thời gian giữ lệnh quá lâu (max_hold_minutes)
+        4. Giá đã đi ngược quá X% so với entry (adverse move)
+        """
+        try:
+            symbol = pos.symbol
+            side = pos.side
+            entry = float(pos.entry_price or 0)
+            sl = float(pos.sl or 0)
+            tp = float(pos.tp or 0)
+
+            if entry <= 0:
+                return False, "NO_ENTRY"
+
+            # Config (có default an toàn)
+            lookback = int(self.cfg.get("invalidation_lookback_candles", 12))
+            min_remaining_rr = float(self.cfg.get("min_remaining_rr", 0.4))
+            max_hold_min = int(self.cfg.get("max_hold_minutes", 360))  # 6 giờ
+            adverse_pct = float(self.cfg.get("max_adverse_pct", 1.5))  # % đi ngược
+            bos_buffer = float(self.cfg.get("bos_buffer_pct", 0.15)) / 100  # 0.15%
+
+            # Lấy nến
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe="15m", limit=max(lookback + 5, 30))
+            if not ohlcv or len(ohlcv) < 5:
+                return False, "NO_DATA"
+
+            # OHLCV: [ts, open, high, low, close, volume]
+            closes = [c[4] for c in ohlcv]
+            highs = [c[2] for c in ohlcv]
+            lows = [c[3] for c in ohlcv]
+            current_price = closes[-1]
+
+            # --- 1. Break of Structure ngược chiều ---
+            recent_high = max(highs[-lookback:-1]) if len(highs) > lookback else max(highs[:-1])
+            recent_low = min(lows[-lookback:-1]) if len(lows) > lookback else min(lows[:-1])
+
+            if side == Side.LONG:
+                # Phá đáy gần nhất → BOS reverse
+                if current_price < recent_low * (1 - bos_buffer):
+                    return True, f"BOS_REVERSE_LONG (price={current_price:.6f} < low={recent_low:.6f})"
+            else:
+                if current_price > recent_high * (1 + bos_buffer):
+                    return True, f"BOS_REVERSE_SHORT (price={current_price:.6f} > high={recent_high:.6f})"
+
+            # --- 2. Remaining RR quá thấp ---
+            risk = abs(entry - sl) if sl > 0 else 0
+            if risk > 0 and tp > 0:
+                if side == Side.LONG:
+                    remaining = tp - current_price
+                else:
+                    remaining = current_price - tp
+                remaining_rr = remaining / risk if risk else 0
+                if remaining_rr < min_remaining_rr:
+                    return True, f"LOW_REMAINING_RR ({remaining_rr:.2f} < {min_remaining_rr})"
+
+            # --- 3. Thời gian giữ quá lâu ---
+            open_time = pos.open_time or datetime.utcnow()
+            hold_min = (datetime.utcnow() - open_time).total_seconds() / 60
+            if hold_min > max_hold_min:
+                return True, f"TIMEOUT ({hold_min:.0f}min > {max_hold_min}min)"
+
+            # --- 4. Adverse move quá lớn (đi ngược entry) ---
+            if side == Side.LONG:
+                move_pct = (entry - current_price) / entry * 100
+            else:
+                move_pct = (current_price - entry) / entry * 100
+            if move_pct > adverse_pct:
+                return True, f"ADVERSE_MOVE ({move_pct:.2f}% > {adverse_pct}%)"
+
+            return False, "STILL_VALID"
+        except Exception as e:
+            logger.debug(f"check_invalidation error {pos.symbol}: {e}")
+            return False, f"ERROR:{e}"
+
+    def monitor_invalidations(self, exchange, order_logger=None) -> int:
+        """
+        Duyệt toàn bộ open_positions, đóng sớm nếu invalidation.
+        Trả về số vị thế đã đóng vì invalidation.
+        """
+        closed = 0
+        for key, pos in list(self.open_positions.items()):
+            should_close, reason = self.check_invalidation(exchange, pos)
+            if not should_close:
+                continue
+
+            logger.warning(
+                f"INVALIDATION {pos.symbol} {pos.side.value} → {reason} | closing early"
+            )
+
+            try:
+                # Đóng vị thế market
+                exchange.close_position(pos.symbol, pos.side)
+            except Exception as e:
+                logger.error(f"Close on invalidation failed {pos.symbol}: {e}")
+                continue
+
+            # Hủy SL/TP còn lại
+            try:
+                exchange.cancel_all_orders(pos.symbol)
+            except Exception as e:
+                logger.warning(f"Cancel after invalidation failed: {e}")
+
+            # Ước PnL
+            pnl = self._estimate_realized_pnl(exchange, pos)
+            # Nếu chưa có trade, ước từ giá hiện tại
+            if pnl == 0.0:
+                try:
+                    ticker = exchange.fetch_ticker(pos.symbol)
+                    price = float(ticker.get("last") or pos.entry_price)
+                    if pos.side == Side.LONG:
+                        pnl = (price - pos.entry_price) * pos.size
+                    else:
+                        pnl = (pos.entry_price - price) * pos.size
+                except Exception:
+                    pass
+
+            self.close_position(key, pnl)
+            closed += 1
+
+            if order_logger:
+                try:
+                    order_logger.log(
+                        action="CLOSE",
+                        symbol=pos.symbol,
+                        side=pos.side.value,
+                        size=pos.size,
+                        entry=pos.entry_price,
+                        sl=pos.sl,
+                        tp=pos.tp,
+                        order_id=pos.order_id or "",
+                        strategy=pos.strategy or "",
+                        status="INVALIDATED",
+                        mode=getattr(exchange.mode, "value", ""),
+                        note=f"Invalidation: {reason} | PnL≈{pnl:.4f}",
+                    )
+                except Exception as e:
+                    logger.warning(f"OrderLogger INVALIDATE failed: {e}")
+
+            logger.info(
+                f"INVALIDATED & CLOSED {pos.side.value} {pos.symbol} | "
+                f"reason={reason} | PnL≈{pnl:.4f}"
+            )
+
+        return closed
 
     def check(self, signal: Signal, current_price: float = None, current_positions=None) -> Tuple[bool, str]:
         """
