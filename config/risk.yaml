@@ -1,7 +1,8 @@
 # ====================== RISK GATE (BẮT BUỘC) ======================
 max_position_pct: 0.05
 max_total_exposure_pct: 0.30
-max_open_positions: 5
+# Tổng tối đa toàn bot (scalp+day+swing). Mỗi style riêng = 5 → tổng mặc định 15
+max_open_positions: 15
 min_risk_reward: 1.8
 max_daily_loss_pct: 0.03
 max_drawdown_pct: 0.12
@@ -18,6 +19,13 @@ kill_on_api_error_rate: 0.15
 kill_on_high_volatility_atr: 4.0
 
 duplicate_window_seconds: 300
+
+# ====================== LIMIT THEO STYLE ======================
+# Mỗi loại tối đa 5 vị thế
+max_positions_per_style:
+  scalp: 5
+  day: 5
+  swing: 5
 
 # ====================== INVALIDATION ======================
 invalidation_lookback_candles: 12
