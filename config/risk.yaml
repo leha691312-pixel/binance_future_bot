@@ -1,9 +1,8 @@
-# ====================== RISK GATE (BẮT BUỘC) ======================
+# ====================== RISK GATE ======================
 max_position_pct: 0.05
 max_total_exposure_pct: 0.30
-# Tổng tối đa toàn bot (scalp+day+swing). Mỗi style riêng = 5 → tổng mặc định 15
 max_open_positions: 15
-min_risk_reward: 1.8
+min_risk_reward: 1.5
 max_daily_loss_pct: 0.03
 max_drawdown_pct: 0.12
 cooldown_seconds: 45
@@ -20,14 +19,11 @@ kill_on_high_volatility_atr: 4.0
 
 duplicate_window_seconds: 300
 
-# ====================== LIMIT THEO STYLE ======================
-# Mỗi loại tối đa 5 vị thế
 max_positions_per_style:
   scalp: 5
   day: 5
   swing: 5
 
-# ====================== INVALIDATION ======================
 invalidation_lookback_candles: 12
 min_remaining_rr: 0.4
 max_adverse_pct: 1.5
@@ -43,17 +39,24 @@ hold_profiles:
     max_hold_minutes: 2880
 
 strategy_trade_style:
+  # Scalp
   ORB: scalp
   LiquiditySweep: scalp
+  MARibbon: scalp
+  StochBB: scalp
+  PivotScalp: scalp
+  EMARSIScalp: scalp
+  # Day
   OrderBlock: day
   SupplyDemand: day
   FVG: day
   BOS_CHOCH: day
-  OI_Funding: swing
   TrendMA: day
   MomentumRSI: day
   PullbackEMA: day
   RangeBounce: day
+  # Swing
+  OI_Funding: swing
 
 force_paper_on_startup: true
 require_manual_confirm_live: true
