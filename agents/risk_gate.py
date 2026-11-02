@@ -3,6 +3,7 @@ Risk Gate - BẮT BUỘC trước mọi lệnh.
 Chống lệnh trùng, position size, RR, daily loss, kill switch.
 Theo dõi vị thế đóng (TP/SL) → ghi PnL + hủy lệnh còn lại.
 Phát hiện invalidation / đảo chiều → đóng sớm.
+max_hold_minutes tự điều chỉnh theo scalp / day trade / swing.
 """
 from datetime import datetime, timedelta
 from typing import Dict, Tuple, Optional, Any, List
@@ -68,6 +69,10 @@ class RiskGate:
                         p.order_id = old.order_id
                     if old.open_time:
                         p.open_time = old.open_time
+                    if getattr(old, "timeframe", None):
+                        p.timeframe = old.timeframe
+                    if getattr(old, "trade_style", None):
+                        p.trade_style = old.trade_style
                 current[key] = p
 
             self.open_positions = current
@@ -93,28 +98,20 @@ class RiskGate:
                 if key in live_keys:
                     continue
 
-                # Vị thế đã biến mất trên sàn → đã đóng
                 closed_count += 1
                 symbol = pos.symbol
                 side = pos.side.value if hasattr(pos.side, "value") else str(pos.side)
 
-                # 1. Hủy toàn bộ lệnh còn treo (SL hoặc TP còn lại)
                 try:
                     exchange.cancel_all_orders(symbol)
                     logger.info(f"Canceled remaining protective orders for {symbol}")
                 except Exception as e:
                     logger.warning(f"Cancel orders failed {symbol}: {e}")
 
-                # 2. Ước tính PnL (cố lấy realized từ trades gần nhất)
                 pnl = self._estimate_realized_pnl(exchange, pos)
-
-                # 3. Cập nhật RiskGate
                 self.close_position(key, pnl)
-
-                # Xóa protective order ids
                 self.protective_orders.pop(key, None)
 
-                # 4. Ghi Excel
                 if order_logger:
                     try:
                         order_logger.log(
@@ -177,6 +174,79 @@ class RiskGate:
             return 0.0
 
     # ------------------------------------------------------------------
+    # TRADE STYLE → max hold (scalp / day / swing)
+    # ------------------------------------------------------------------
+    def _classify_trade_style(self, strategy: str = "", timeframe: str = "") -> str:
+        """
+        Phân loại: scalp | day | swing
+        Ưu tiên map theo strategy, sau đó theo timeframe.
+        """
+        strategy = (strategy or "").lower().strip()
+        timeframe = (timeframe or "").lower().strip()
+
+        # 1) Map tường minh theo strategy (config)
+        style_map = self.cfg.get("strategy_trade_style") or {}
+        if strategy in style_map:
+            return str(style_map[strategy]).lower()
+
+        # Heuristic theo tên strategy
+        if any(k in strategy for k in ("orb", "opening", "scalp", "liquidity_sweep", "sweep")):
+            return "scalp"
+        if any(k in strategy for k in ("oi", "funding", "swing")):
+            return "swing"
+        if any(k in strategy for k in ("bos", "choch", "fvg", "order_block", "ob", "supply", "demand")):
+            # phụ thuộc TF
+            pass
+
+        # 2) Theo timeframe
+        tf_minutes = self._timeframe_to_minutes(timeframe)
+        if tf_minutes <= 5:
+            return "scalp"
+        if tf_minutes <= 60:
+            return "day"
+        return "swing"
+
+    def _timeframe_to_minutes(self, tf: str) -> int:
+        tf = (tf or "").lower().strip()
+        if not tf:
+            return 15
+        try:
+            if tf.endswith("m"):
+                return int(tf[:-1])
+            if tf.endswith("h"):
+                return int(tf[:-1]) * 60
+            if tf.endswith("d"):
+                return int(tf[:-1]) * 1440
+            if tf.endswith("w"):
+                return int(tf[:-1]) * 10080
+        except ValueError:
+            pass
+        return 15
+
+    def _resolve_max_hold_minutes(self, pos: Position) -> Tuple[int, str]:
+        """
+        Trả về (max_hold_minutes, trade_style).
+        Dùng profile trong risk.yaml, fallback default.
+        """
+        style = (getattr(pos, "trade_style", None) or "").lower()
+        if not style:
+            style = self._classify_trade_style(
+                strategy=getattr(pos, "strategy", "") or "",
+                timeframe=getattr(pos, "timeframe", "") or "",
+            )
+
+        profiles = self.cfg.get("hold_profiles") or {}
+        profile = profiles.get(style) or {}
+        max_min = profile.get("max_hold_minutes")
+
+        if max_min is None:
+            # Fallback cứng
+            defaults = {"scalp": 45, "day": 360, "swing": 2880}
+            max_min = defaults.get(style, int(self.cfg.get("max_hold_minutes", 360)))
+
+        return int(max_min), style
+
+    # ------------------------------------------------------------------
     # INVALIDATION / TREND REVERSAL
     # ------------------------------------------------------------------
     def check_invalidation(self, exchange, pos: Position) -> Tuple[bool, str]:
@@ -185,10 +255,10 @@ class RiskGate:
         Trả về (should_close: bool, reason: str)
 
         Các điều kiện:
-        1. Break of Structure ngược chiều (giá phá swing gần nhất)
-        2. Remaining RR quá thấp (< min_remaining_rr)
-        3. Thời gian giữ lệnh quá lâu (max_hold_minutes)
-        4. Giá đã đi ngược quá X% so với entry (adverse move)
+        1. Break of Structure ngược chiều
+        2. Remaining RR quá thấp
+        3. Thời gian giữ quá lâu (tự điều chỉnh theo scalp/day/swing)
+        4. Adverse move quá lớn
         """
         try:
             symbol = pos.symbol
@@ -200,37 +270,35 @@ class RiskGate:
             if entry <= 0:
                 return False, "NO_ENTRY"
 
-            # Config (có default an toàn)
             lookback = int(self.cfg.get("invalidation_lookback_candles", 12))
             min_remaining_rr = float(self.cfg.get("min_remaining_rr", 0.4))
-            max_hold_min = int(self.cfg.get("max_hold_minutes", 360))  # 6 giờ
-            adverse_pct = float(self.cfg.get("max_adverse_pct", 1.5))  # % đi ngược
-            bos_buffer = float(self.cfg.get("bos_buffer_pct", 0.15)) / 100  # 0.15%
+            adverse_pct = float(self.cfg.get("max_adverse_pct", 1.5))
+            bos_buffer = float(self.cfg.get("bos_buffer_pct", 0.15)) / 100
 
-            # Lấy nến
+            # max hold tự động theo style
+            max_hold_min, style = self._resolve_max_hold_minutes(pos)
+
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe="15m", limit=max(lookback + 5, 30))
             if not ohlcv or len(ohlcv) < 5:
                 return False, "NO_DATA"
 
-            # OHLCV: [ts, open, high, low, close, volume]
             closes = [c[4] for c in ohlcv]
             highs = [c[2] for c in ohlcv]
             lows = [c[3] for c in ohlcv]
             current_price = closes[-1]
 
-            # --- 1. Break of Structure ngược chiều ---
+            # --- 1. BOS reverse ---
             recent_high = max(highs[-lookback:-1]) if len(highs) > lookback else max(highs[:-1])
             recent_low = min(lows[-lookback:-1]) if len(lows) > lookback else min(lows[:-1])
 
             if side == Side.LONG:
-                # Phá đáy gần nhất → BOS reverse
                 if current_price < recent_low * (1 - bos_buffer):
                     return True, f"BOS_REVERSE_LONG (price={current_price:.6f} < low={recent_low:.6f})"
             else:
                 if current_price > recent_high * (1 + bos_buffer):
                     return True, f"BOS_REVERSE_SHORT (price={current_price:.6f} > high={recent_high:.6f})"
 
-            # --- 2. Remaining RR quá thấp ---
+            # --- 2. Remaining RR ---
             risk = abs(entry - sl) if sl > 0 else 0
             if risk > 0 and tp > 0:
                 if side == Side.LONG:
@@ -241,13 +309,16 @@ class RiskGate:
                 if remaining_rr < min_remaining_rr:
                     return True, f"LOW_REMAINING_RR ({remaining_rr:.2f} < {min_remaining_rr})"
 
-            # --- 3. Thời gian giữ quá lâu ---
+            # --- 3. Timeout (adaptive) ---
             open_time = pos.open_time or datetime.utcnow()
             hold_min = (datetime.utcnow() - open_time).total_seconds() / 60
             if hold_min > max_hold_min:
-                return True, f"TIMEOUT ({hold_min:.0f}min > {max_hold_min}min)"
+                return True, (
+                    f"TIMEOUT_{style.upper()} "
+                    f"({hold_min:.0f}min > {max_hold_min}min)"
+                )
 
-            # --- 4. Adverse move quá lớn (đi ngược entry) ---
+            # --- 4. Adverse move ---
             if side == Side.LONG:
                 move_pct = (entry - current_price) / entry * 100
             else:
@@ -255,16 +326,13 @@ class RiskGate:
             if move_pct > adverse_pct:
                 return True, f"ADVERSE_MOVE ({move_pct:.2f}% > {adverse_pct}%)"
 
-            return False, "STILL_VALID"
+            return False, f"STILL_VALID[{style}]"
         except Exception as e:
             logger.debug(f"check_invalidation error {pos.symbol}: {e}")
             return False, f"ERROR:{e}"
 
     def monitor_invalidations(self, exchange, order_logger=None) -> int:
-        """
-        Duyệt toàn bộ open_positions, đóng sớm nếu invalidation.
-        Trả về số vị thế đã đóng vì invalidation.
-        """
+        """Duyệt open_positions, đóng sớm nếu invalidation."""
         closed = 0
         for key, pos in list(self.open_positions.items()):
             should_close, reason = self.check_invalidation(exchange, pos)
@@ -276,21 +344,17 @@ class RiskGate:
             )
 
             try:
-                # Đóng vị thế market
                 exchange.close_position(pos.symbol, pos.side)
             except Exception as e:
                 logger.error(f"Close on invalidation failed {pos.symbol}: {e}")
                 continue
 
-            # Hủy SL/TP còn lại
             try:
                 exchange.cancel_all_orders(pos.symbol)
             except Exception as e:
                 logger.warning(f"Cancel after invalidation failed: {e}")
 
-            # Ước PnL
             pnl = self._estimate_realized_pnl(exchange, pos)
-            # Nếu chưa có trade, ước từ giá hiện tại
             if pnl == 0.0:
                 try:
                     ticker = exchange.fetch_ticker(pos.symbol)
@@ -332,55 +396,42 @@ class RiskGate:
         return closed
 
     def check(self, signal: Signal, current_price: float = None, current_positions=None) -> Tuple[bool, str]:
-        """
-        Trả về (approved: bool, reason: str)
-        """
         self._reset_daily_if_needed()
 
         if self.kill_switch:
             return False, f"KILL_SWITCH: {self.kill_reason}"
 
-        # 1. Daily loss limit
         if self.daily_pnl <= -self.cfg["max_daily_loss_pct"] * self.equity:
             self.activate_kill_switch("DAILY_LOSS_LIMIT")
             return False, "DAILY_LOSS_LIMIT"
 
-        # 2. Max drawdown (cần equity peak tracking - simplified)
-
-        # 3. Max open positions
         if len(self.open_positions) >= self.cfg["max_open_positions"]:
             return False, "MAX_OPEN_POSITIONS"
 
-        # 3b. Symbol đã có vị thế trên sàn → không mở thêm
         symbol_keys = [k for k in self.open_positions if k.startswith(signal.symbol + "_")]
         if symbol_keys:
             return False, f"EXCHANGE ALREADY HAS POSITION ({signal.symbol})"
 
-        # 4. Duplicate protection
         key = f"{signal.symbol}_{signal.side.value}"
         last_time = self.recent_orders.get(key)
         if last_time and (datetime.utcnow() - last_time).total_seconds() < self.cfg["duplicate_window_seconds"]:
             return False, "DUPLICATE_ORDER_WINDOW"
 
-        # 5. Risk:Reward
         rr = signal.risk_reward()
         if rr < self.cfg["min_risk_reward"]:
             return False, f"RR_TOO_LOW ({rr:.2f} < {self.cfg['min_risk_reward']})"
 
-        # 6. Position size check
         risk_amount = self.equity * self.cfg["risk_per_trade_pct"]
         stop_distance = abs(signal.entry - signal.sl)
         if stop_distance <= 0:
             return False, "INVALID_SL"
 
-        # 7. Total exposure
         current_exposure = sum(p.size * p.entry_price for p in self.open_positions.values())
         max_exposure = self.equity * self.cfg["max_total_exposure_pct"]
         estimated_notional = risk_amount / (stop_distance / signal.entry) if signal.entry else 0
         if current_exposure + estimated_notional > max_exposure:
             return False, "MAX_TOTAL_EXPOSURE"
 
-        # 8. Consecutive losses
         if self.consecutive_losses >= self.cfg["kill_on_consecutive_losses"]:
             self.activate_kill_switch("CONSECUTIVE_LOSSES")
             return False, "CONSECUTIVE_LOSSES"
@@ -390,6 +441,25 @@ class RiskGate:
     def register_order(self, signal: Signal, order_id: str, size: float, sl_order_id: str = "", tp_order_id: str = ""):
         key = f"{signal.symbol}_{signal.side.value}"
         self.recent_orders[key] = datetime.utcnow()
+
+        tf = getattr(signal, "timeframe", "") or ""
+        style = self._classify_trade_style(strategy=signal.strategy or "", timeframe=tf)
+        max_hold, _ = self._resolve_max_hold_minutes(
+            Position(
+                symbol=signal.symbol,
+                side=signal.side,
+                entry_price=signal.entry,
+                size=size,
+                sl=signal.sl,
+                tp=signal.tp,
+                order_id=order_id,
+                strategy=signal.strategy or "",
+                open_time=datetime.utcnow(),
+                timeframe=tf,
+                trade_style=style,
+            )
+        )
+
         self.open_positions[key] = Position(
             symbol=signal.symbol,
             side=signal.side,
@@ -400,13 +470,18 @@ class RiskGate:
             order_id=order_id,
             strategy=signal.strategy,
             open_time=datetime.utcnow(),
+            timeframe=tf,
+            trade_style=style,
         )
         if sl_order_id or tp_order_id:
             self.protective_orders[key] = {
                 "sl_id": sl_order_id or "",
                 "tp_id": tp_order_id or "",
             }
-        logger.info(f"RiskGate registered: {key} size={size}")
+        logger.info(
+            f"RiskGate registered: {key} size={size} | style={style} | "
+            f"max_hold={max_hold}min | tf={tf or 'n/a'}"
+        )
 
     def close_position(self, key: str, pnl: float):
         if key in self.open_positions:
