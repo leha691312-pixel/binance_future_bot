@@ -108,51 +108,155 @@ class ExchangeWrapper:
         except Exception:
             return {}
 
+        def _is_tradable_market(self, market: dict, quote: str = "USDT") -> bool:
+        """Chỉ nhận perpetual USDT đang active + status TRADING."""
+        if not market or not isinstance(market, dict):
+            return False
+        if not market.get("active", True):
+            return False
+        if market.get("spot"):
+            return False
+        # Bỏ delivery / quarterly (có expiry)
+        if market.get("expiry") or market.get("expiryDatetime"):
+            return False
+        if market.get("swap") is False and market.get("future"):
+            return False
+
+        info = market.get("info") or {}
+        status = str(info.get("status") or info.get("contractStatus") or "").upper()
+        if status and status not in ("TRADING", "LIVE"):
+            return False
+
+        symbol = market.get("symbol") or ""
+        if f"/{quote}" not in symbol and f":{quote}" not in symbol:
+            return False
+
+        q = quote.upper()
+        quote_ccxt = (market.get("quote") or "").upper()
+        settle = (market.get("settle") or "").upper()
+        if quote_ccxt and quote_ccxt != q and settle != q:
+            return False
+        return True
+
+    def _normalize_symbol(self, sym: str, quote: str = "USDT") -> str:
+        """Chuẩn hóa về dạng CCXT perpetual: BTC/USDT:USDT."""
+        if not sym:
+            return sym
+        if f":{quote}" in sym:
+            return sym
+        if sym.endswith(f"/{quote}"):
+            return f"{sym}:{quote}"
+        return sym
+
     def get_top_symbols(self, n: int = 20, quote: str = "USDT") -> List[str]:
-        """Lấy top N theo volume 24h.
-        Symbol Futures CCXT dạng BTC/USDT:USDT (không phải BTC/USDT).
+        """Top N theo volume 24h — chỉ symbol TRADING + active trên đúng mode.
+
+        - paper: markets + volume public mainnet
+        - testnet/demo: chỉ symbol có trong markets của demo exchange
+        - live: markets + volume live exchange
         """
+        default_pairs = [
+            "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT",
+            "SOL/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT",
+            "ADA/USDT:USDT", "AVAX/USDT:USDT", "LINK/USDT:USDT",
+            "DOT/USDT:USDT",
+        ]
+
+        markets: Dict[str, Any] = {}
+        try:
+            if self.mode == Mode.PAPER:
+                public = ccxt.binanceusdm({
+                    "enableRateLimit": True,
+                    "options": {"defaultType": "future"},
+                })
+                public.load_markets()
+                markets = public.markets or {}
+            elif self.exchange:
+                if not getattr(self.exchange, "markets", None):
+                    self.exchange.load_markets()
+                markets = self.exchange.markets or {}
+        except Exception as e:
+            logger.warning(f"load_markets for top symbols failed: {e}")
+
+        tradable = set()
+        for sym, m in (markets or {}).items():
+            try:
+                if self._is_tradable_market(m, quote=quote):
+                    tradable.add(self._normalize_symbol(sym, quote))
+            except Exception:
+                continue
+
         tickers = {}
         try:
-            # Luôn ưu tiên public endpoint để lấy volume (ổn định hơn demo)
-            public = ccxt.binanceusdm({"enableRateLimit": True, "options": {"defaultType": "future"}})
-            tickers = public.fetch_tickers()
+            if self.mode != Mode.PAPER and self.exchange:
+                tickers = self.exchange.fetch_tickers() or {}
+            else:
+                public = ccxt.binanceusdm({
+                    "enableRateLimit": True,
+                    "options": {"defaultType": "future"},
+                })
+                tickers = public.fetch_tickers() or {}
         except Exception as e:
-            logger.warning(f"Public fetch_tickers failed: {e}")
+            logger.warning(f"fetch_tickers failed: {e}")
             try:
                 if self.exchange:
-                    tickers = self.exchange.fetch_tickers()
+                    tickers = self.exchange.fetch_tickers() or {}
             except Exception as e2:
-                logger.warning(f"Exchange fetch_tickers failed: {e2}")
+                logger.warning(f"exchange fetch_tickers failed: {e2}")
 
-        usdt_pairs = []
+        ranked = []
         for sym, t in tickers.items():
-            # Hỗ trợ cả BTC/USDT và BTC/USDT:USDT
+            norm = self._normalize_symbol(sym, quote)
+            # Bắt buộc nằm trong markets TRADING của mode hiện tại
+            if tradable and norm not in tradable and sym not in tradable:
+                continue
             is_usdt = (
                 sym.endswith(f"/{quote}")
                 or sym.endswith(f"/{quote}:{quote}")
                 or f"/{quote}:" in sym
             )
-            # Bỏ qua quarterlies / delivery nếu muốn chỉ perpetual
             if not is_usdt:
                 continue
             vol = t.get("quoteVolume") or t.get("baseVolume") or 0
-            if vol and float(vol) > 0:
-                usdt_pairs.append((sym, float(vol)))
+            try:
+                vol_f = float(vol or 0)
+            except (TypeError, ValueError):
+                vol_f = 0.0
+            if vol_f <= 0:
+                continue
+            ranked.append((norm, vol_f))
 
-        usdt_pairs.sort(key=lambda x: x[1], reverse=True)
-        result = [s[0] for s in usdt_pairs[:n]]
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        seen = set()
+        result = []
+        for s, _ in ranked:
+            if s in seen:
+                continue
+            seen.add(s)
+            result.append(s)
+            if len(result) >= n:
+                break
 
-        # Fallback cứng nếu vẫn rỗng (mạng lỗi / demo hạn chế)
+        if len(result) < n and tradable:
+            for s in sorted(tradable):
+                if s not in seen:
+                    result.append(s)
+                    seen.add(s)
+                if len(result) >= n:
+                    break
+
         if not result:
-            logger.warning("Top symbols empty → using default major pairs")
-            result = [
-                "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT",
-                "SOL/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT",
-                "ADA/USDT:USDT", "AVAX/USDT:USDT", "LINK/USDT:USDT",
-                "DOT/USDT:USDT",
-            ][:n]
-        return result
+            logger.warning("Top symbols empty after TRADING filter → default majors")
+            if tradable:
+                result = [s for s in default_pairs if s in tradable][:n]
+            if not result:
+                result = default_pairs[:n]
+
+        logger.info(
+            f"Top symbols ({self.mode.value}): {len(result)}/{n} "
+            f"(tradable_markets={len(tradable)})"
+        )
+        return result[:n]
 
     # ------------------------------------------------------------------
     # Account
