@@ -8,7 +8,7 @@ scan_interval_seconds: 120
 timeframes: ["15m", "1h", "4h"]
 
 # ====================== STRATEGIES ======================
-# Bật TẤT CẢ chiến thuật (để trống [] hoặc null = all)
+# SMC + Sarwa classic day trading (11 strategies)
 enabled_strategies:
   - ORB
   - LiquiditySweep
@@ -17,8 +17,11 @@ enabled_strategies:
   - FVG
   - BOS_CHOCH
   - OI_Funding
+  - TrendMA
+  - MomentumRSI
+  - PullbackEMA
+  - RangeBounce
 
-# Params riêng từng strategy (optional)
 strategy_params:
   ORB:
     range_bars: 4
@@ -43,6 +46,27 @@ strategy_params:
     funding_extreme: 0.0008
     min_oi_change: 0.03
     rr: 2.0
+  TrendMA:
+    ema_fast: 9
+    ema_slow: 21
+    adx_min: 25
+    rr: 2.0
+  MomentumRSI:
+    rsi_period: 14
+    rsi_mid: 50
+    adx_min: 20
+    rr: 2.0
+  PullbackEMA:
+    ema_fast: 21
+    ema_slow: 50
+    adx_min: 25
+    rr: 2.2
+  RangeBounce:
+    lookback: 40
+    adx_max: 22
+    rsi_low: 35
+    rsi_high: 65
+    rr: 1.8
 
 # Capital & Risk (override by risk.yaml)
 initial_capital: 1000
