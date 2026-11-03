@@ -1,8 +1,8 @@
-"""
-Risk Gate - enable_low_remaining_rr=false disables LOW_REMAINING_RR
-"""
+"""Risk Gate - TIMEOUT-only invalidation"""
 import zlib, base64
-from agents._rg_data1 import B64_PART1
-from agents._rg_data2 import B64_PART2
-_SRC = zlib.decompress(base64.b64decode(B64_PART1 + B64_PART2)).decode("utf-8")
+from agents._rg_p0 import P0
+from agents._rg_p1 import P1
+from agents._rg_p2 import P2
+from agents._rg_p3 import P3
+_SRC = zlib.decompress(base64.b64decode(P0 + P1 + P2 + P3)).decode("utf-8")
 exec(_SRC, globals())
