@@ -1,7 +1,8 @@
 # ====================== RISK GATE ======================
 max_position_pct: 0.05
 max_total_exposure_pct: 0.30
-max_open_positions: 15
+# Tổng tối đa 10 vị thế — không chia quota scalp/day/swing
+max_open_positions: 10
 min_risk_reward: 1.5
 max_daily_loss_pct: 0.03
 max_drawdown_pct: 0.12
@@ -19,17 +20,9 @@ kill_on_high_volatility_atr: 4.0
 
 duplicate_window_seconds: 300
 
-max_positions_per_style:
-  scalp: 5
-  day: 5
-  swing: 5
-
-# ---- Invalidation: CHỈ TIMEOUT ----
-# BOS / ADVERSE_MOVE / LOW_REMAINING_RR = tắt trong code
-enable_bos_reverse: false
-enable_adverse_move: false
-enable_low_remaining_rr: false
-max_hold_minutes: 480
+# Invalidation: CHỈ TIMEOUT (max hold theo style)
+# Đã gỡ BOS reverse / ADVERSE_MOVE / LOW_REMAINING_RR
+max_hold_minutes: 720
 
 hold_profiles:
   scalp:
@@ -39,6 +32,7 @@ hold_profiles:
   swing:
     max_hold_minutes: 4320
 
+# Map strategy → style (chỉ để chọn max_hold, không giới hạn số lệnh/style)
 strategy_trade_style:
   ORB: scalp
   LiquiditySweep: scalp
