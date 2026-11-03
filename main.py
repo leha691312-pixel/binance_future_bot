@@ -23,9 +23,9 @@ load_dotenv()
 
 
 def load_config():
-    with open(Path(__file__).parent / "config" / "settings.yaml") as f:
+    with open(Path(__file__).parent / "config" / "settings.yaml", encoding="utf-8") as f:
         settings = yaml.safe_load(f)
-    with open(Path(__file__).parent / "config" / "risk.yaml") as f:
+    with open(Path(__file__).parent / "config" / "risk.yaml", encoding="utf-8") as f:
         risk = yaml.safe_load(f)
     return settings, risk
 
