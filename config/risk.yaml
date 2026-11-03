@@ -24,16 +24,13 @@ max_positions_per_style:
   day: 5
   swing: 5
 
-# ---- Invalidation / reverse (ĐÃ NỚI LỎNG) ----
-# lookback lớn hơn → chỉ coi là đảo khi phá swing rõ hơn
+# ---- Invalidation / reverse ----
 invalidation_lookback_candles: 20
-# chỉ đóng sớm khi RR còn lại rất thấp
-min_remaining_rr: 0.15
-# cho phép đi ngược entry xa hơn trước khi coi là adverse
+# TẮT hẳn LOW_REMAINING_RR: min_remaining_rr <= 0 → không đóng vì RR còn lại thấp
+enable_low_remaining_rr: false
+min_remaining_rr: 0
 max_adverse_pct: 3.5
-# buffer phá BOS lớn hơn (0.4% thay vì 0.15%)
 bos_buffer_pct: 0.40
-# fallback max hold (dùng khi không có hold_profiles)
 max_hold_minutes: 480
 
 hold_profiles:
