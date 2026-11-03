@@ -423,27 +423,157 @@ class ExchangeWrapper:
         ok_lev = self.set_leverage(symbol, leverage)
         return ok_margin and ok_lev
 
-    def cancel_all_orders(self, symbol: str = None):
-        if self.mode == Mode.PAPER:
-            self.paper_orders.clear()
-            return
+    def _market_id(self, symbol: str) -> str:
+        """BTC/USDT:USDT → BTCUSDT"""
         try:
+            if self.exchange and getattr(self.exchange, "markets", None):
+                m = self.exchange.market(symbol)
+                return m.get("id") or symbol.replace("/", "").replace(":USDT", "")
+        except Exception:
+            pass
+        return (
+            symbol.replace("/", "")
+            .replace(":USDT", "")
+            .replace(":USDC", "")
+        )
+
+    def cancel_all_orders(self, symbol: str = None) -> int:
+        """Hủy lệnh mở + conditional (STOP/TP) trên symbol hoặc toàn bộ.
+
+        Binance không tự hủy SL khi TP khớp → bot phải cancel chủ động.
+        """
+        if self.mode == Mode.PAPER:
             if symbol:
-                self.exchange.cancel_all_orders(symbol)
-            else:
-                # cancel all open
-                for pos in self.get_positions():
-                    self.exchange.cancel_all_orders(pos.symbol)
+                to_del = [k for k, o in self.paper_orders.items() if o.get("symbol") == symbol]
+                for k in to_del:
+                    del self.paper_orders[k]
+                return len(to_del)
+            n = len(self.paper_orders)
+            self.paper_orders.clear()
+            return n
+
+        cancelled = 0
+        symbols: List[str] = [symbol] if symbol else []
+        if not symbols:
+            try:
+                open_orders = self.exchange.fetch_open_orders() or []
+                symbols = list({o.get("symbol") for o in open_orders if o.get("symbol")})
+            except Exception:
+                open_orders = []
+            try:
+                for p in self.get_positions():
+                    if p.symbol not in symbols:
+                        symbols.append(p.symbol)
+            except Exception:
+                pass
+
+        for sym in symbols:
+            if not sym:
+                continue
+            # 1) ccxt cancel_all_orders
+            try:
+                self.exchange.cancel_all_orders(sym)
+                cancelled += 1
+                logger.info(f"cancel_all_orders OK: {sym}")
+            except Exception as e:
+                logger.debug(f"cancel_all_orders {sym}: {e}")
+
+            # 2) Hủy từng lệnh còn lại
+            try:
+                for o in self.exchange.fetch_open_orders(sym) or []:
+                    oid = o.get("id")
+                    if not oid:
+                        continue
+                    try:
+                        self.exchange.cancel_order(oid, sym)
+                        cancelled += 1
+                    except Exception as e:
+                        logger.debug(f"cancel_order {sym} {oid}: {e}")
+            except Exception as e:
+                logger.debug(f"fetch_open_orders {sym}: {e}")
+
+            mid = self._market_id(sym)
+            # 3) REST allOpenOrders
+            try:
+                if hasattr(self.exchange, "fapiPrivateDeleteAllOpenOrders"):
+                    self.exchange.fapiPrivateDeleteAllOpenOrders({"symbol": mid})
+                    cancelled += 1
+                elif hasattr(self.exchange, "request"):
+                    self.exchange.request(
+                        "allOpenOrders",
+                        "fapiPrivate",
+                        "DELETE",
+                        {"symbol": mid},
+                    )
+                    cancelled += 1
+            except Exception as e:
+                logger.debug(f"fapi allOpenOrders {sym}: {e}")
+
+            # 4) Algo / conditional orders (lệnh điều kiện trên app Binance)
+            try:
+                if hasattr(self.exchange, "fapiPrivateDeleteAllOpenAlgoOrders"):
+                    self.exchange.fapiPrivateDeleteAllOpenAlgoOrders({"symbol": mid})
+                    cancelled += 1
+            except Exception as e:
+                logger.debug(f"fapi algo cancel {sym}: {e}")
+            try:
+                if hasattr(self.exchange, "request"):
+                    self.exchange.request(
+                        "algo/openOrders",
+                        "fapiPrivate",
+                        "DELETE",
+                        {"symbol": mid},
+                    )
+                    cancelled += 1
+            except Exception as e:
+                logger.debug(f"algo/openOrders {sym}: {e}")
+
+        return cancelled
+
+    def cleanup_orphan_orders(self) -> int:
+        """Hủy SL/TP còn treo khi symbol KHÔNG còn vị thế (sau khi chạm TP/SL)."""
+        if self.mode == Mode.PAPER:
+            return 0
+        try:
+            pos_symbols = {p.symbol for p in self.get_positions()}
         except Exception as e:
-            logger.error(f"Cancel all failed: {e}")
+            logger.warning(f"cleanup_orphan_orders get_positions: {e}")
+            return 0
+
+        order_symbols = set()
+        try:
+            for o in self.exchange.fetch_open_orders() or []:
+                s = o.get("symbol")
+                if s:
+                    order_symbols.add(s)
+        except Exception as e:
+            logger.debug(f"cleanup fetch_open_orders: {e}")
+
+        orphans = [s for s in order_symbols if s not in pos_symbols]
+        total = 0
+        for sym in orphans:
+            logger.warning(f"Orphan orders on {sym} (no position) → cancel all")
+            total += self.cancel_all_orders(sym) or 0
+        if orphans:
+            logger.info(f"Cleaned orphan orders on {len(orphans)} symbol(s)")
+        return total
 
     def close_position(self, symbol: str, side: Side):
-        """Market close position"""
+        """Market close position + hủy lệnh bảo vệ còn lại."""
         positions = self.get_positions()
         for p in positions:
             if p.symbol == symbol and p.side == side:
                 close_side = "sell" if side == Side.LONG else "buy"
-                return self.create_order(symbol, close_side, p.size, order_type="market")
+                order = self.create_order(symbol, close_side, p.size, order_type="market")
+                try:
+                    self.cancel_all_orders(symbol)
+                except Exception as e:
+                    logger.warning(f"Cancel after close failed {symbol}: {e}")
+                return order
+        try:
+            self.cancel_all_orders(symbol)
+        except Exception:
+            pass
         return None
 
     def flatten_all(self):
@@ -452,5 +582,9 @@ class ExchangeWrapper:
         self.cancel_all_orders()
         for p in self.get_positions():
             self.close_position(p.symbol, p.side)
+        try:
+            self.cleanup_orphan_orders()
+        except Exception:
+            pass
         if self.mode == Mode.PAPER:
             self.paper_positions.clear()

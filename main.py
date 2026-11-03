@@ -84,6 +84,14 @@ def main():
     synced = risk_gate.sync_positions_from_exchange(exchange)
     logger.info(f"Startup sync: {synced} positions")
 
+    # Dọn SL/TP còn treo khi không còn position (ARIA, SOL... trong app)
+    try:
+        n = exchange.cleanup_orphan_orders()
+        if n:
+            logger.info(f"Startup cleaned orphan orders ≈{n}")
+    except Exception as e:
+        logger.warning(f"Startup cleanup_orphan_orders: {e}")
+
     enabled = settings.get("enabled_strategies")
     if enabled is not None and len(enabled) == 0:
         enabled = None
@@ -161,6 +169,10 @@ def main():
                 closed = risk_gate.handle_closed_positions(exchange, order_logger)
                 invalidated = risk_gate.monitor_invalidations(exchange, order_logger)
                 risk_gate.sync_positions_from_exchange(exchange)
+                try:
+                    exchange.cleanup_orphan_orders()
+                except Exception as e:
+                    logger.debug(f"cleanup_orphan_orders: {e}")
                 control_state.last_cycle_info = f"PAUSED | closed={closed} invalidated={invalidated}"
                 time.sleep(settings.get("scan_interval_seconds", 60))
                 continue
@@ -168,6 +180,12 @@ def main():
             closed = risk_gate.handle_closed_positions(exchange, order_logger)
             invalidated = risk_gate.monitor_invalidations(exchange, order_logger)
             risk_gate.sync_positions_from_exchange(exchange)
+
+            # Hủy SL/TP còn treo khi không còn position
+            try:
+                exchange.cleanup_orphan_orders()
+            except Exception as e:
+                logger.debug(f"cleanup_orphan_orders: {e}")
 
             if hasattr(scanner, "top_n"):
                 scanner.top_n = int(settings.get("top_n", scanner.top_n))
