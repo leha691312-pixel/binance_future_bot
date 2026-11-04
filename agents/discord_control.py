@@ -1,20 +1,19 @@
 """
-Discord Control Interface for Binance Futures Bot
-Giao diện nút bấm (Buttons + Select) + vẫn hỗ trợ lệnh text cũ.
+Discord Control – UI tối ưu (Embed + Buttons + Select + Modal)
 
-Cấu hình trong .env:
+.env:
   DISCORD_BOT_TOKEN=...
-  DISCORD_ALLOWED_IDS=123456789,987654321
-  DISCORD_PREFIX=!                          # mặc định !
+  DISCORD_ALLOWED_IDS=123,456
+  DISCORD_PREFIX=!
 
-Cách dùng chính:
-  !panel  hoặc  !menu  → hiện bảng điều khiển với nút
+Dùng: !panel  (hoặc !menu / !ui)
 """
 from __future__ import annotations
 
 import os
 import threading
-from typing import Any, Dict, Optional, Set
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Set, Tuple
 from pathlib import Path
 
 import yaml
@@ -23,13 +22,12 @@ from loguru import logger
 try:
     import discord
     from discord.ext import commands
-    from discord import app_commands
+
     HAS_DISCORD = True
 except ImportError:
     HAS_DISCORD = False
     discord = None
     commands = None
-    app_commands = None
 
 
 ALLOWED_RISK_KEYS = {
@@ -51,10 +49,31 @@ ALLOWED_SETTINGS_KEYS = {
     "scan_interval_seconds": (int, 30, 600),
 }
 
+# Nhãn tiếng Việt cho select / modal
+PARAM_LABELS = {
+    "default_leverage": ("Đòn bẩy mặc định", "1–20"),
+    "max_leverage": ("Đòn bẩy tối đa", "1–50"),
+    "risk_per_trade_pct": ("Risk mỗi lệnh", "0.001–0.05 (vd 0.01 = 1%)"),
+    "max_position_pct": ("% vốn 1 vị thế", "0.01–0.2"),
+    "max_total_exposure_pct": ("Tổng exposure", "0.05–1.0"),
+    "max_open_positions": ("Số vị thế tối đa", "1–20"),
+    "min_risk_reward": ("RR tối thiểu", "1.0–5.0"),
+    "max_daily_loss_pct": ("Lỗ ngày tối đa", "0.005–0.2"),
+    "duplicate_window_seconds": ("Chống lệnh trùng (giây)", "30–3600"),
+    "kill_on_consecutive_losses": ("Kill sau N lệnh thua", "2–20"),
+    "cooldown_seconds": ("Cooldown sau lệnh (giây)", "0–600"),
+    "top_n": ("Số symbol quét", "5–100"),
+    "scan_interval_seconds": ("Chu kỳ scan (giây)", "30–600"),
+}
+
+COLOR_OK = 0x2ECC71
+COLOR_WARN = 0xF1C40F
+COLOR_DANGER = 0xE74C3C
+COLOR_INFO = 0x3498DB
+COLOR_IDLE = 0x95A5A6
+
 
 class BotControlState:
-    """Shared state giữa main loop và Discord."""
-
     def __init__(self):
         self.risk_gate = None
         self.executor = None
@@ -89,9 +108,7 @@ def _parse_allowed_ids() -> Set[int]:
 
 def _user_authorized(user_id: int) -> bool:
     allowed = _parse_allowed_ids()
-    if not allowed:
-        return False
-    return user_id in allowed
+    return bool(allowed) and user_id in allowed
 
 
 def _is_authorized(ctx) -> bool:
@@ -100,9 +117,11 @@ def _is_authorized(ctx) -> bool:
 
 async def _check_interaction(interaction) -> bool:
     if not _user_authorized(interaction.user.id):
-        await interaction.response.send_message(
-            "⛔ Bạn không có quyền điều khiển bot.", ephemeral=True
-        )
+        msg = "⛔ Bạn không có quyền điều khiển bot."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
         return False
     return True
 
@@ -114,7 +133,6 @@ def _save_risk_yaml(risk_cfg: dict):
             yaml.safe_dump(
                 risk_cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False
             )
-        logger.info("risk.yaml saved via Discord")
     except Exception as e:
         logger.warning(f"Failed to save risk.yaml: {e}")
 
@@ -126,79 +144,211 @@ def _save_settings_yaml(settings: dict):
             yaml.safe_dump(
                 settings, f, default_flow_style=False, allow_unicode=True, sort_keys=False
             )
-        logger.info("settings.yaml saved via Discord")
     except Exception as e:
         logger.warning(f"Failed to save settings.yaml: {e}")
 
 
-def _status_text() -> str:
+def _snapshot() -> Dict[str, Any]:
+    """Lấy snapshot trạng thái an toàn."""
     st = control_state
     rg = st.risk_gate
-    if not rg:
-        return "Bot chưa sẵn sàng."
-    equity = rg.equity
+    equity = float(getattr(rg, "equity", 0) or 0) if rg else 0.0
     try:
         if st.exchange:
-            equity = st.exchange.get_balance()
-            rg.update_equity(equity)
+            equity = float(st.exchange.get_balance())
+            if rg:
+                rg.update_equity(equity)
     except Exception:
         pass
-    pos_n = len(rg.open_positions)
-    lines = [
-        f"**Mode:** `{st.mode}`",
-        f"**Paused:** `{st.paused}`",
-        f"**Kill switch:** `{rg.kill_switch}`"
-        + (f" ({rg.kill_reason})" if rg.kill_switch else ""),
-        f"**Equity:** `{equity:.2f}` USDT",
-        f"**Daily PnL:** `{rg.daily_pnl:.4f}`",
-        f"**Open positions:** `{pos_n}` / max `{rg.cfg.get('max_open_positions', '?')}`",
-        f"**Consecutive losses:** `{rg.consecutive_losses}`",
-        f"**Leverage:** default=`{getattr(st.executor, 'default_leverage', '?')}` "
-        f"max=`{getattr(st.executor, 'max_leverage', '?')}`",
-        f"**Scan interval:** `{st.settings.get('scan_interval_seconds', '?')}s` | "
-        f"top_n=`{st.settings.get('top_n', '?')}`",
-    ]
-    if st.last_cycle_info:
-        lines.append(f"**Last cycle:** {st.last_cycle_info}")
-    return "\n".join(lines)
+
+    pos_n = len(rg.open_positions) if rg else 0
+    max_pos = (rg.cfg.get("max_open_positions") if rg else st.risk_cfg.get("max_open_positions")) or "?"
+    daily = float(getattr(rg, "daily_pnl", 0) or 0) if rg else 0.0
+    kill = bool(getattr(rg, "kill_switch", False)) if rg else False
+    kill_reason = str(getattr(rg, "kill_reason", "") or "") if rg else ""
+    losses = int(getattr(rg, "consecutive_losses", 0) or 0) if rg else 0
+    dlev = getattr(st.executor, "default_leverage", st.risk_cfg.get("default_leverage", "?"))
+    mlev = getattr(st.executor, "max_leverage", st.risk_cfg.get("max_leverage", "?"))
+
+    return {
+        "mode": st.mode,
+        "paused": st.paused,
+        "equity": equity,
+        "daily_pnl": daily,
+        "pos_n": pos_n,
+        "max_pos": max_pos,
+        "kill": kill,
+        "kill_reason": kill_reason,
+        "losses": losses,
+        "dlev": dlev,
+        "mlev": mlev,
+        "scan": st.settings.get("scan_interval_seconds", "?"),
+        "top_n": st.settings.get("top_n", "?"),
+        "last_cycle": st.last_cycle_info or "—",
+        "ready": rg is not None,
+    }
 
 
-def _positions_text() -> str:
+def _panel_color(snap: dict) -> int:
+    if not snap["ready"]:
+        return COLOR_IDLE
+    if snap["kill"]:
+        return COLOR_DANGER
+    if snap["paused"]:
+        return COLOR_WARN
+    return COLOR_OK
+
+
+def _status_embed() -> "discord.Embed":
+    snap = _snapshot()
+    if not snap["ready"]:
+        return discord.Embed(
+            title="Bot chưa sẵn sàng",
+            description="Đợi main loop khởi tạo xong rồi bấm **Làm mới**.",
+            color=COLOR_IDLE,
+        )
+
+    if snap["kill"]:
+        state = f"🛑 KILL — {snap['kill_reason'] or 'active'}"
+    elif snap["paused"]:
+        state = "⏸ Tạm dừng (pause)"
+    else:
+        state = "▶️ Đang chạy"
+
+    pnl = snap["daily_pnl"]
+    pnl_s = f"{'+' if pnl >= 0 else ''}{pnl:.4f}"
+
+    emb = discord.Embed(
+        title="📊 Trạng thái bot",
+        color=_panel_color(snap),
+        timestamp=datetime.now(timezone.utc),
+    )
+    emb.add_field(name="Trạng thái", value=state, inline=True)
+    emb.add_field(name="Mode", value=f"`{snap['mode']}`", inline=True)
+    emb.add_field(name="Equity", value=f"`{snap['equity']:.2f}` USDT", inline=True)
+    emb.add_field(name="PnL ngày", value=f"`{pnl_s}`", inline=True)
+    emb.add_field(
+        name="Vị thế",
+        value=f"`{snap['pos_n']}` / `{snap['max_pos']}`",
+        inline=True,
+    )
+    emb.add_field(name="Thua liên tiếp", value=f"`{snap['losses']}`", inline=True)
+    emb.add_field(
+        name="Leverage",
+        value=f"default `{snap['dlev']}` · max `{snap['mlev']}`",
+        inline=True,
+    )
+    emb.add_field(
+        name="Scan",
+        value=f"mỗi `{snap['scan']}`s · top `{snap['top_n']}`",
+        inline=True,
+    )
+    emb.add_field(
+        name="Cycle gần nhất",
+        value=str(snap["last_cycle"])[:200],
+        inline=False,
+    )
+    emb.set_footer(text="Binance Futures Bot")
+    return emb
+
+
+def _positions_embed() -> "discord.Embed":
     st = control_state
+    emb = discord.Embed(title="📈 Vị thế đang mở", color=COLOR_INFO, timestamp=datetime.now(timezone.utc))
     if not st.exchange:
-        return "Exchange chưa sẵn sàng."
+        emb.description = "Exchange chưa sẵn sàng."
+        emb.color = COLOR_IDLE
+        return emb
     try:
         positions = st.exchange.get_positions()
     except Exception as e:
-        return f"Lỗi lấy positions: {e}"
+        emb.description = f"Lỗi: `{e}`"
+        emb.color = COLOR_DANGER
+        return emb
     if not positions:
-        return "Không có vị thế đang mở."
-    lines = ["**Open positions:**"]
-    for p in positions[:25]:
+        emb.description = "Không có vị thế nào."
+        emb.color = COLOR_IDLE
+        return emb
+
+    total_upnl = 0.0
+    lines = []
+    for p in positions[:20]:
         side = p.side.value if hasattr(p.side, "value") else str(p.side)
+        upnl = float(getattr(p, "unrealized_pnl", 0) or 0)
+        total_upnl += upnl
+        flag = "🟢" if side.upper() == "LONG" else "🔴"
         lines.append(
-            f"• `{p.symbol}` {side} size={p.size} entry={p.entry_price:.6g} "
-            f"uPnL={getattr(p, 'unrealized_pnl', 0):.4f}"
+            f"{flag} `{p.symbol}` **{side}** size=`{p.size}`\n"
+            f"　entry `{p.entry_price:.6g}` · uPnL `{upnl:+.4f}`"
         )
-    return "\n".join(lines)
+    emb.description = "\n".join(lines)
+    emb.add_field(name="Tổng uPnL", value=f"`{total_upnl:+.4f}`", inline=True)
+    emb.add_field(name="Số lệnh", value=f"`{len(positions)}`", inline=True)
+    emb.set_footer(text="Tối đa 20 dòng")
+    return emb
 
 
-def _params_text() -> str:
+def _params_embed() -> "discord.Embed":
     st = control_state
     rg = st.risk_gate
     cfg = (rg.cfg if rg else st.risk_cfg) or {}
-    lines = ["**Risk params:**"]
+    emb = discord.Embed(
+        title="⚙️ Thông số",
+        description="Chọn trong menu **Chỉnh thông số** hoặc dùng preset đòn bẩy.",
+        color=COLOR_INFO,
+        timestamp=datetime.now(timezone.utc),
+    )
+    risk_lines = []
     for k in sorted(ALLOWED_RISK_KEYS.keys()):
-        lines.append(f"• `{k}` = `{cfg.get(k, 'N/A')}`")
-    lines.append("\n**Settings:**")
+        label = PARAM_LABELS.get(k, (k, ""))[0]
+        risk_lines.append(f"• **{label}** (`{k}`): `{cfg.get(k, 'N/A')}`")
+    emb.add_field(name="Risk", value="\n".join(risk_lines)[:1020], inline=False)
+    set_lines = []
     for k in sorted(ALLOWED_SETTINGS_KEYS.keys()):
-        lines.append(f"• `{k}` = `{st.settings.get(k, 'N/A')}`")
-    lines.append("\n*Chỉnh nhanh: menu bên dưới hoặc `!set key value`*")
-    return "\n".join(lines)
+        label = PARAM_LABELS.get(k, (k, ""))[0]
+        set_lines.append(f"• **{label}** (`{k}`): `{st.settings.get(k, 'N/A')}`")
+    emb.add_field(name="Settings", value="\n".join(set_lines), inline=False)
+    return emb
+
+
+def _panel_embed() -> "discord.Embed":
+    snap = _snapshot()
+    if snap["kill"]:
+        state = f"🛑 KILL ({snap['kill_reason'] or 'on'})"
+    elif snap["paused"]:
+        state = "⏸ PAUSED"
+    elif snap["ready"]:
+        state = "▶️ RUNNING"
+    else:
+        state = "⏳ STARTING"
+
+    emb = discord.Embed(
+        title="🎛️ Control Panel",
+        description=(
+            f"**{state}** · mode `{snap['mode']}`\n"
+            f"Equity **{snap['equity']:.2f}** USDT · "
+            f"PnL ngày `{snap['daily_pnl']:+.4f}` · "
+            f"Positions **{snap['pos_n']}/{snap['max_pos']}**\n\n"
+            f"Dùng nút bên dưới. Chỉ user trong `DISCORD_ALLOWED_IDS`."
+        ),
+        color=_panel_color(snap),
+        timestamp=datetime.now(timezone.utc),
+    )
+    emb.add_field(
+        name="Leverage",
+        value=f"`{snap['dlev']}`x (max `{snap['mlev']}`)",
+        inline=True,
+    )
+    emb.add_field(
+        name="Scan",
+        value=f"`{snap['scan']}`s · top `{snap['top_n']}`",
+        inline=True,
+    )
+    emb.set_footer(text="Làm mới để cập nhật · Panel ~30 phút")
+    return emb
 
 
 def _apply_param(key: str, value: str) -> str:
-    """Áp dụng 1 param; trả về message kết quả."""
     key = key.strip().lower()
     st = control_state
 
@@ -207,108 +357,96 @@ def _apply_param(key: str, value: str) -> str:
         try:
             val = typ(value)
         except ValueError:
-            return f"Giá trị không hợp lệ cho `{key}`"
+            return f"❌ Giá trị không hợp lệ cho `{key}`"
         if not (lo <= val <= hi):
-            return f"`{key}` phải trong khoảng [{lo}, {hi}]"
+            return f"❌ `{key}` phải trong [{lo}, {hi}]"
         if st.risk_gate:
             st.risk_gate.cfg[key] = val
         st.risk_cfg[key] = val
         if key == "default_leverage" and st.executor:
             st.executor.default_leverage = int(val)
         if key == "max_leverage" and st.executor:
-            st.executor.max_leverage = max(st.executor.default_leverage, int(val))
+            st.executor.max_leverage = max(int(getattr(st.executor, "default_leverage", 1)), int(val))
         _save_risk_yaml(st.risk_gate.cfg if st.risk_gate else st.risk_cfg)
-        return f"✅ `{key}` = `{val}` (đã lưu risk.yaml)"
+        label = PARAM_LABELS.get(key, (key,))[0]
+        return f"✅ **{label}** = `{val}`"
 
     if key in ALLOWED_SETTINGS_KEYS:
         typ, lo, hi = ALLOWED_SETTINGS_KEYS[key]
         try:
             val = typ(value)
         except ValueError:
-            return f"Giá trị không hợp lệ cho `{key}`"
+            return f"❌ Giá trị không hợp lệ cho `{key}`"
         if not (lo <= val <= hi):
-            return f"`{key}` phải trong khoảng [{lo}, {hi}]"
+            return f"❌ `{key}` phải trong [{lo}, {hi}]"
         st.settings[key] = val
         _save_settings_yaml(st.settings)
-        return f"✅ `{key}` = `{val}` (đã lưu settings.yaml)"
+        label = PARAM_LABELS.get(key, (key,))[0]
+        return f"✅ **{label}** = `{val}`"
 
-    return f"Key `{key}` không được phép chỉnh."
+    return f"❌ Key `{key}` không được phép."
 
 
 # ---------------------------------------------------------------------------
-# UI Views
+# Views
 # ---------------------------------------------------------------------------
 
 if HAS_DISCORD:
 
     class ConfirmKillView(discord.ui.View):
         def __init__(self):
-            super().__init__(timeout=30)
+            super().__init__(timeout=45)
 
-        @discord.ui.button(label="Xác nhận KILL", style=discord.ButtonStyle.danger, emoji="🛑")
+        @discord.ui.button(
+            label="Xác nhận KILL", style=discord.ButtonStyle.danger, emoji="🛑"
+        )
         async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
             if not await _check_interaction(interaction):
                 return
             st = control_state
             if st.risk_gate:
                 st.risk_gate.activate_kill_switch("DISCORD_KILL")
-            await interaction.response.edit_message(
-                content="🛑 Kill switch **ON**. Bot sẽ flatten và tạm dừng.",
-                view=None,
+            emb = discord.Embed(
+                title="🛑 Kill switch ON",
+                description="Bot sẽ flatten và tạm dừng vòng lặp.",
+                color=COLOR_DANGER,
             )
+            await interaction.response.edit_message(content=None, embed=emb, view=None)
 
         @discord.ui.button(label="Hủy", style=discord.ButtonStyle.secondary)
         async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
             if not await _check_interaction(interaction):
                 return
-            await interaction.response.edit_message(content="Đã hủy kill.", view=None)
+            await interaction.response.edit_message(
+                content="Đã hủy kill.", embed=None, view=None
+            )
 
     class ParamSelect(discord.ui.Select):
         def __init__(self):
-            options = [
-                discord.SelectOption(
-                    label="default_leverage",
-                    description="Leverage mặc định (1–20)",
-                    value="default_leverage",
-                ),
-                discord.SelectOption(
-                    label="max_leverage",
-                    description="Leverage tối đa (1–50)",
-                    value="max_leverage",
-                ),
-                discord.SelectOption(
-                    label="risk_per_trade_pct",
-                    description="Risk % mỗi lệnh",
-                    value="risk_per_trade_pct",
-                ),
-                discord.SelectOption(
-                    label="max_open_positions",
-                    description="Số vị thế tối đa",
-                    value="max_open_positions",
-                ),
-                discord.SelectOption(
-                    label="min_risk_reward",
-                    description="RR tối thiểu",
-                    value="min_risk_reward",
-                ),
-                discord.SelectOption(
-                    label="max_daily_loss_pct",
-                    description="Giới hạn lỗ ngày",
-                    value="max_daily_loss_pct",
-                ),
-                discord.SelectOption(
-                    label="top_n",
-                    description="Số symbol quét",
-                    value="top_n",
-                ),
-                discord.SelectOption(
-                    label="scan_interval_seconds",
-                    description="Chu kỳ scan (giây)",
-                    value="scan_interval_seconds",
-                ),
-            ]
+            options = []
+            for key in [
+                "default_leverage",
+                "max_leverage",
+                "risk_per_trade_pct",
+                "max_open_positions",
+                "min_risk_reward",
+                "max_daily_loss_pct",
+                "top_n",
+                "scan_interval_seconds",
+            ]:
+                label, hint = PARAM_LABELS.get(key, (key, ""))
+                st = control_state
+                cfg = (st.risk_gate.cfg if st.risk_gate else st.risk_cfg) or {}
+                cur = cfg.get(key, st.settings.get(key, "?"))
+                options.append(
+                    discord.SelectOption(
+                        label=label[:100],
+                        description=f"Hiện: {cur} · {hint}"[:100],
+                        value=key,
+                    )
+                )
             super().__init__(
-                placeholder="Chọn thông số để chỉnh…",
+                placeholder="✏️ Chỉnh thông số…",
                 min_values=1,
                 max_values=1,
                 options=options,
@@ -318,18 +456,18 @@ if HAS_DISCORD:
         async def callback(self, interaction: discord.Interaction):
             if not await _check_interaction(interaction):
                 return
-            key = self.values[0]
-            await interaction.response.send_modal(SetParamModal(key))
+            await interaction.response.send_modal(SetParamModal(self.values[0]))
 
     class SetParamModal(discord.ui.Modal):
         def __init__(self, key: str):
-            super().__init__(title=f"Set {key}")
+            label, hint = PARAM_LABELS.get(key, (key, ""))
+            super().__init__(title=f"Chỉnh: {label}"[:45])
             self.key = key
             st = control_state
             cfg = (st.risk_gate.cfg if st.risk_gate else st.risk_cfg) or {}
             current = cfg.get(key, st.settings.get(key, ""))
             self.value_input = discord.ui.TextInput(
-                label=f"Giá trị mới cho {key}",
+                label=f"Giá trị ({hint})"[:45],
                 placeholder=str(current),
                 default=str(current) if current != "" else None,
                 required=True,
@@ -342,80 +480,123 @@ if HAS_DISCORD:
                 await interaction.response.send_message("⛔ Không có quyền.", ephemeral=True)
                 return
             msg = _apply_param(self.key, str(self.value_input.value).strip())
-            await interaction.response.send_message(msg, ephemeral=True)
+            emb = discord.Embed(
+                description=msg,
+                color=COLOR_OK if msg.startswith("✅") else COLOR_DANGER,
+            )
+            await interaction.response.send_message(embed=emb, ephemeral=True)
 
     class ControlPanelView(discord.ui.View):
-        """Bảng điều khiển chính – timeout dài để dùng lâu."""
+        """Panel chính – timeout 30 phút."""
 
         def __init__(self):
-            super().__init__(timeout=600)
+            super().__init__(timeout=1800)
             self.add_item(ParamSelect())
 
-        @discord.ui.button(label="Status", style=discord.ButtonStyle.primary, emoji="📊", row=0)
-        async def btn_status(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if not await _check_interaction(interaction):
-                return
-            await interaction.response.send_message(_status_text(), ephemeral=True)
+        async def on_timeout(self):
+            # Không edit được message ở đây dễ dàng không có ref; user gõ !panel lại
+            pass
 
-        @discord.ui.button(label="Positions", style=discord.ButtonStyle.primary, emoji="📈", row=0)
-        async def btn_positions(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if not await _check_interaction(interaction):
-                return
-            await interaction.response.send_message(_positions_text(), ephemeral=True)
-
-        @discord.ui.button(label="Params", style=discord.ButtonStyle.secondary, emoji="⚙️", row=0)
-        async def btn_params(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if not await _check_interaction(interaction):
-                return
-            await interaction.response.send_message(_params_text(), ephemeral=True)
-
-        @discord.ui.button(label="Refresh panel", style=discord.ButtonStyle.secondary, emoji="🔄", row=0)
-        async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if not await _check_interaction(interaction):
-                return
+        async def _refresh_panel(self, interaction: discord.Interaction):
             await interaction.response.edit_message(
-                content=_panel_header(),
+                content=None,
+                embed=_panel_embed(),
                 view=ControlPanelView(),
             )
 
-        @discord.ui.button(label="Pause", style=discord.ButtonStyle.secondary, emoji="⏸", row=1)
+        @discord.ui.button(label="Làm mới", style=discord.ButtonStyle.primary, emoji="🔄", row=0)
+        async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            await self._refresh_panel(interaction)
+
+        @discord.ui.button(label="Trạng thái", style=discord.ButtonStyle.secondary, emoji="📊", row=0)
+        async def btn_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            await interaction.response.send_message(embed=_status_embed(), ephemeral=True)
+
+        @discord.ui.button(label="Vị thế", style=discord.ButtonStyle.secondary, emoji="📈", row=0)
+        async def btn_positions(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            await interaction.response.send_message(embed=_positions_embed(), ephemeral=True)
+
+        @discord.ui.button(label="Thông số", style=discord.ButtonStyle.secondary, emoji="⚙️", row=0)
+        async def btn_params(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            await interaction.response.send_message(embed=_params_embed(), ephemeral=True)
+
+        @discord.ui.button(label="Tạm dừng", style=discord.ButtonStyle.secondary, emoji="⏸", row=1)
         async def btn_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
             if not await _check_interaction(interaction):
                 return
             control_state.paused = True
-            await interaction.response.send_message(
-                "⏸ Bot đã **pause** (không scan/execute). Vị thế vẫn giữ.",
-                ephemeral=True,
+            await interaction.response.edit_message(
+                embed=_panel_embed(), view=ControlPanelView()
             )
 
-        @discord.ui.button(label="Resume", style=discord.ButtonStyle.success, emoji="▶️", row=1)
+        @discord.ui.button(label="Tiếp tục", style=discord.ButtonStyle.success, emoji="▶️", row=1)
         async def btn_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
             if not await _check_interaction(interaction):
                 return
             control_state.paused = False
-            await interaction.response.send_message("▶️ Bot đã **resume**.", ephemeral=True)
+            await interaction.response.edit_message(
+                embed=_panel_embed(), view=ControlPanelView()
+            )
 
         @discord.ui.button(label="Kill", style=discord.ButtonStyle.danger, emoji="🛑", row=1)
         async def btn_kill(self, interaction: discord.Interaction, button: discord.ui.Button):
             if not await _check_interaction(interaction):
                 return
+            emb = discord.Embed(
+                title="⚠️ Xác nhận Kill",
+                description=(
+                    "Bật kill switch sẽ **flatten** vị thế và dừng bot.\n"
+                    "Chỉ bấm xác nhận nếu bạn chắc chắn."
+                ),
+                color=COLOR_DANGER,
+            )
             await interaction.response.send_message(
-                "⚠️ Xác nhận bật kill switch (flatten + dừng)?",
-                view=ConfirmKillView(),
-                ephemeral=True,
+                embed=emb, view=ConfirmKillView(), ephemeral=True
             )
 
-        @discord.ui.button(label="Unkill", style=discord.ButtonStyle.success, emoji="✅", row=1)
+        @discord.ui.button(label="Gỡ Kill", style=discord.ButtonStyle.success, emoji="✅", row=1)
         async def btn_unkill(self, interaction: discord.Interaction, button: discord.ui.Button):
             if not await _check_interaction(interaction):
                 return
-            st = control_state
-            if st.risk_gate:
-                st.risk_gate.reset_kill_switch()
-            await interaction.response.send_message("✅ Kill switch **OFF**.", ephemeral=True)
+            if control_state.risk_gate:
+                control_state.risk_gate.reset_kill_switch()
+            await interaction.response.edit_message(
+                embed=_panel_embed(), view=ControlPanelView()
+            )
 
-        @discord.ui.button(label="Clear skip", style=discord.ButtonStyle.secondary, emoji="🧹", row=2)
-        async def btn_skip_clear(self, interaction: discord.Interaction, button: discord.ui.Button):
+        @discord.ui.button(label="Lev 3x", style=discord.ButtonStyle.secondary, row=2)
+        async def btn_lev3(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            msg = _apply_param("default_leverage", "3")
+            await interaction.response.send_message(msg, ephemeral=True)
+
+        @discord.ui.button(label="Lev 5x", style=discord.ButtonStyle.secondary, row=2)
+        async def btn_lev5(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            msg = _apply_param("default_leverage", "5")
+            await interaction.response.send_message(msg, ephemeral=True)
+
+        @discord.ui.button(label="Lev 10x", style=discord.ButtonStyle.secondary, row=2)
+        async def btn_lev10(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            msg = _apply_param("default_leverage", "10")
+            await interaction.response.send_message(msg, ephemeral=True)
+
+        @discord.ui.button(
+            label="Xóa skip", style=discord.ButtonStyle.secondary, emoji="🧹", row=2
+        )
+        async def btn_skip(self, interaction: discord.Interaction, button: discord.ui.Button):
             if not await _check_interaction(interaction):
                 return
             st = control_state
@@ -423,24 +604,12 @@ if HAS_DISCORD:
                 n = len(st.executor.skip_symbols)
                 st.executor.skip_symbols.clear()
                 await interaction.response.send_message(
-                    f"Đã xóa **{n}** symbol khỏi skip list.", ephemeral=True
+                    f"🧹 Đã xóa **{n}** symbol khỏi skip list.", ephemeral=True
                 )
             else:
-                await interaction.response.send_message("Executor chưa sẵn sàng.", ephemeral=True)
-
-
-def _panel_header() -> str:
-    st = control_state
-    paused = "⏸ PAUSED" if st.paused else "▶️ RUNNING"
-    kill = ""
-    if st.risk_gate and st.risk_gate.kill_switch:
-        kill = f" | 🛑 KILL: {st.risk_gate.kill_reason}"
-    return (
-        f"**Binance Futures Bot – Control Panel**\n"
-        f"Mode: `{st.mode}` | {paused}{kill}\n"
-        f"Bấm nút bên dưới để thao tác. Chỉ user được phép trong `DISCORD_ALLOWED_IDS`.\n"
-        f"*Panel hết hạn sau ~10 phút → gõ `!panel` để mở lại.*"
-    )
+                await interaction.response.send_message(
+                    "Executor chưa sẵn sàng.", ephemeral=True
+                )
 
 
 def create_bot() -> Optional[Any]:
@@ -462,75 +631,86 @@ def create_bot() -> Optional[Any]:
     async def on_ready():
         logger.info(f"Discord control online as {bot.user} (prefix={prefix})")
 
+    @bot.event
+    async def on_command_error(ctx, error):
+        if isinstance(error, commands.CommandNotFound):
+            return
+        logger.warning(f"Discord command error: {error}")
+        try:
+            await ctx.send(f"⚠️ Lỗi: `{error}`", delete_after=15)
+        except Exception:
+            pass
+
     @bot.command(name="panel", aliases=["menu", "ui"])
     async def cmd_panel(ctx):
         if not _is_authorized(ctx):
-            await ctx.send("⛔ Bạn không có quyền điều khiển bot.")
+            await ctx.send("⛔ Bạn không có quyền điều khiển bot.", delete_after=10)
             return
-        await ctx.send(content=_panel_header(), view=ControlPanelView())
+        await ctx.send(embed=_panel_embed(), view=ControlPanelView())
 
     @bot.command(name="help")
     async def cmd_help(ctx):
         if not _is_authorized(ctx):
-            await ctx.send("⛔ Bạn không có quyền điều khiển bot.")
+            await ctx.send("⛔ Không có quyền.", delete_after=10)
             return
-        text = (
-            "**Binance Futures Bot – Discord Control**\n"
-            f"**Khuyến nghị:** `{prefix}panel` → bảng nút bấm\n\n"
-            f"`{prefix}panel` / `{prefix}menu` – mở control panel (nút)\n"
-            f"`{prefix}status` – trạng thái\n"
-            f"`{prefix}positions` – vị thế\n"
-            f"`{prefix}params` – thông số\n"
-            f"`{prefix}set <key> <value>` – chỉnh thông số\n"
-            f"`{prefix}pause` / `{prefix}resume`\n"
-            f"`{prefix}kill` / `{prefix}unkill`\n"
-            f"`{prefix}skip clear` – xóa skip list\n"
+        emb = discord.Embed(
+            title="Trợ giúp điều khiển",
+            description=(
+                f"**Khuyến nghị:** `{prefix}panel` — bảng nút + embed\n\n"
+                f"`{prefix}panel` · `{prefix}menu` · `{prefix}ui`\n"
+                f"`{prefix}status` · `{prefix}positions` · `{prefix}params`\n"
+                f"`{prefix}set <key> <value>`\n"
+                f"`{prefix}pause` · `{prefix}resume`\n"
+                f"`{prefix}kill` · `{prefix}unkill`\n"
+                f"`{prefix}skip clear`"
+            ),
+            color=COLOR_INFO,
         )
-        await ctx.send(text)
+        await ctx.send(embed=emb)
 
     @bot.command(name="status")
     async def cmd_status(ctx):
         if not _is_authorized(ctx):
-            await ctx.send("⛔ Không có quyền.")
+            await ctx.send("⛔ Không có quyền.", delete_after=10)
             return
-        await ctx.send(_status_text())
+        await ctx.send(embed=_status_embed())
 
     @bot.command(name="positions")
     async def cmd_positions(ctx):
         if not _is_authorized(ctx):
-            await ctx.send("⛔ Không có quyền.")
+            await ctx.send("⛔ Không có quyền.", delete_after=10)
             return
-        await ctx.send(_positions_text())
+        await ctx.send(embed=_positions_embed())
 
     @bot.command(name="params")
     async def cmd_params(ctx):
         if not _is_authorized(ctx):
-            await ctx.send("⛔ Không có quyền.")
+            await ctx.send("⛔ Không có quyền.", delete_after=10)
             return
-        await ctx.send(_params_text())
+        await ctx.send(embed=_params_embed())
 
     @bot.command(name="set")
     async def cmd_set(ctx, key: str = None, value: str = None):
         if not _is_authorized(ctx):
-            await ctx.send("⛔ Không có quyền.")
+            await ctx.send("⛔ Không có quyền.", delete_after=10)
             return
         if not key or value is None:
-            await ctx.send(f"Dùng: `{prefix}set <key> <value>` hoặc mở `{prefix}panel`")
+            await ctx.send(f"Dùng: `{prefix}set <key> <value>` hoặc `{prefix}panel`")
             return
         await ctx.send(_apply_param(key, value))
 
     @bot.command(name="pause")
     async def cmd_pause(ctx):
         if not _is_authorized(ctx):
-            await ctx.send("⛔ Không có quyền.")
+            await ctx.send("⛔ Không có quyền.", delete_after=10)
             return
         control_state.paused = True
-        await ctx.send("⏸ Bot đã **pause** (không scan/execute). Vị thế vẫn giữ.")
+        await ctx.send("⏸ Bot đã **pause**.")
 
     @bot.command(name="resume")
     async def cmd_resume(ctx):
         if not _is_authorized(ctx):
-            await ctx.send("⛔ Không có quyền.")
+            await ctx.send("⛔ Không có quyền.", delete_after=10)
             return
         control_state.paused = False
         await ctx.send("▶️ Bot đã **resume**.")
@@ -538,27 +718,28 @@ def create_bot() -> Optional[Any]:
     @bot.command(name="kill")
     async def cmd_kill(ctx):
         if not _is_authorized(ctx):
-            await ctx.send("⛔ Không có quyền.")
+            await ctx.send("⛔ Không có quyền.", delete_after=10)
             return
-        await ctx.send(
-            "⚠️ Xác nhận bật kill switch?",
-            view=ConfirmKillView(),
+        emb = discord.Embed(
+            title="⚠️ Xác nhận Kill",
+            description="Bật kill = flatten + dừng.",
+            color=COLOR_DANGER,
         )
+        await ctx.send(embed=emb, view=ConfirmKillView())
 
     @bot.command(name="unkill")
     async def cmd_unkill(ctx):
         if not _is_authorized(ctx):
-            await ctx.send("⛔ Không có quyền.")
+            await ctx.send("⛔ Không có quyền.", delete_after=10)
             return
-        st = control_state
-        if st.risk_gate:
-            st.risk_gate.reset_kill_switch()
+        if control_state.risk_gate:
+            control_state.risk_gate.reset_kill_switch()
         await ctx.send("✅ Kill switch **OFF**.")
 
     @bot.command(name="skip")
     async def cmd_skip(ctx, action: str = None):
         if not _is_authorized(ctx):
-            await ctx.send("⛔ Không có quyền.")
+            await ctx.send("⛔ Không có quyền.", delete_after=10)
             return
         st = control_state
         if action == "clear" and st.executor:
@@ -567,19 +748,17 @@ def create_bot() -> Optional[Any]:
             await ctx.send(f"Đã xóa {n} symbol khỏi skip list.")
         else:
             n = len(getattr(st.executor, "skip_symbols", []) or [])
-            await ctx.send(f"Skip list: {n} symbols. Dùng `{prefix}skip clear` hoặc nút trên panel.")
+            await ctx.send(f"Skip: {n} symbols. `{prefix}skip clear` hoặc nút trên panel.")
 
     return bot
 
 
 def start_discord_in_thread() -> Optional[threading.Thread]:
-    """Chạy Discord bot trong background thread."""
     if not HAS_DISCORD:
         return None
     token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
     if not token:
         return None
-
     bot = create_bot()
     if bot is None:
         return None
