@@ -19,6 +19,7 @@ class ScannerAgent:
         timeframes: List[str] = None,
         enabled_strategies: Optional[List[str]] = None,
         strategy_params: Optional[Dict[str, dict]] = None,
+        excluded_symbols: Optional[List[str]] = None,
     ):
         self.exchange = exchange
         self.top_n = top_n
@@ -29,13 +30,64 @@ class ScannerAgent:
             enabled=enabled_strategies,
             strategy_params=strategy_params,
         )
-        # symbol -> df (TF ưu tiên cuối cùng quét) + symbol_tf -> df
         self.last_dfs: Dict[str, pd.DataFrame] = {}
+        self.excluded_symbols: set = set()
+        self.set_excluded_symbols(excluded_symbols or [])
         names = [s.name for s in self.strategies]
         logger.info(
             f"ScannerAgent ready | Top {top_n} | TFs={self.timeframes} | "
+            f"Excluded={len(self.excluded_symbols)} | "
             f"Strategies ({len(names)}): {names}"
         )
+
+    @staticmethod
+    def normalize_symbol(sym: str, quote: str = "USDT") -> str:
+        if not sym:
+            return ""
+        s = str(sym).strip().upper().replace(" ", "")
+        if not s:
+            return ""
+        if f":{quote}" in s:
+            return s
+        if s.endswith(f"/{quote}"):
+            return f"{s}:{quote}"
+        if s.endswith(quote) and "/" not in s:
+            base = s[: -len(quote)]
+            if base:
+                return f"{base}/{quote}:{quote}"
+        if "/" in s and ":" not in s:
+            return f"{s}:{quote}"
+        if "/" not in s and ":" not in s:
+            return f"{s}/{quote}:{quote}"
+        return s
+
+    def set_excluded_symbols(self, symbols) -> int:
+        out = set()
+        for x in symbols or []:
+            n = self.normalize_symbol(str(x))
+            if n:
+                out.add(n)
+                base = n.split("/")[0]
+                if base:
+                    out.add(base)
+        self.excluded_symbols = out
+        return len([s for s in out if "/" in s])
+
+    def is_excluded(self, symbol: str) -> bool:
+        if not self.excluded_symbols:
+            return False
+        n = self.normalize_symbol(symbol)
+        if n in self.excluded_symbols:
+            return True
+        base = (n.split("/")[0] if n else "").upper()
+        if base and base in self.excluded_symbols:
+            return True
+        if str(symbol).strip().upper() in self.excluded_symbols:
+            return True
+        return False
+
+    def excluded_list_display(self) -> list:
+        return sorted(s for s in self.excluded_symbols if "/" in s)
 
     def reload_strategies(
         self,
@@ -54,7 +106,16 @@ class ScannerAgent:
 
     def scan(self) -> List[Signal]:
         symbols = self.exchange.get_top_symbols(self.top_n)
-        logger.info(f"Scanning {len(symbols)} symbols | strategies={[s.name for s in self.strategies]}")
+        if self.excluded_symbols:
+            before = len(symbols)
+            symbols = [s for s in symbols if not self.is_excluded(s)]
+            skipped = before - len(symbols)
+            if skipped:
+                logger.info(f"Excluded {skipped} symbol(s) from scan blacklist")
+        logger.info(
+            f"Scanning {len(symbols)} symbols | strategies={[s.name for s in self.strategies]} "
+            f"| blacklist={len(self.excluded_list_display())}"
+        )
 
         all_signals: List[Signal] = []
         per_strat: Counter = Counter()
