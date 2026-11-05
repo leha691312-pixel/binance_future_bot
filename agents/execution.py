@@ -1,9 +1,9 @@
 """
-Execution Agent - entry market + TP/SL dạng LIMIT (lệnh cơ bản)
+Execution Agent - entry market + TP LIMIT + SL STOP_MARKET
 - Isolated margin + leverage hợp lý
 - ML on_open kèm risk_amount / notional để label R-multiple
 - TP: LIMIT reduceOnly (Open Orders)
-- SL: thử LIMIT; nếu API reject (marketable) → STOP_MARKET
+- SL: STOP_MARKET only (LIMIT SL khớp ngay = bug)
 """
 from typing import Optional, Set, Tuple
 from loguru import logger
@@ -105,33 +105,27 @@ class ExecutionAgent:
 
             if self.ml_agent is not None:
                 try:
-                    key = f"{signal.symbol}_{signal.side.value}"
                     df = self.ohlcv_cache.get(signal.symbol)
-                    if df is None:
-                        df = self.ohlcv_cache.get(f"{signal.symbol}_{signal.timeframe}")
-                    notional = abs(fill_price * size)
                     actual_risk = abs(fill_price - float(signal.sl)) * size
+                    notional = size * fill_price
                     self.ml_agent.on_open(
                         signal,
-                        df=df,
-                        key=key,
-                        trade_meta={
-                            "risk_amount": actual_risk or risk_amount,
-                            "notional": notional,
-                            "size": size,
-                            "entry": fill_price,
+                        df,
+                        extra={
+                            "risk_amount": float(actual_risk or risk_amount),
+                            "notional": float(notional),
                             "sl": float(signal.sl),
                             "tp": float(signal.tp),
-                            "leverage": leverage,
+                            "fill_price": float(fill_price),
                         },
                     )
                 except Exception as e:
-                    logger.warning(f"ML on_open failed: {e}")
+                    logger.debug(f"ML on_open skip: {e}")
 
             logger.info(
-                f"EXECUTED {signal.side.value} {signal.symbol} size={size} lev={leverage}x "
+                f"EXECUTED {signal.side.value} {signal.symbol} size={size:.6f} lev={leverage}x "
                 f"entry≈{fill_price:.6f} SL={signal.sl:.6f} TP={signal.tp:.6f} "
-                f"strategy={signal.strategy} | margin=ISOLATED | TP/SL=LIMIT"
+                f"strategy={signal.strategy} | margin=ISOLATED | TP=LIMIT SL=STOP_MARKET"
             )
 
             if self.order_logger:
@@ -144,64 +138,89 @@ class ExecutionAgent:
                         entry=fill_price,
                         sl=signal.sl,
                         tp=signal.tp,
-                        order_id=order_id,
+                        leverage=leverage,
                         strategy=signal.strategy,
+                        order_id=order_id,
                         status="FILLED",
-                        mode=getattr(self.exchange.mode, "value", ""),
-                        note=f"lev={leverage}x SL_ok={sl_ok} TP_ok={tp_ok} type=LIMIT",
+                        note=f"lev={leverage}x SL_ok={sl_ok} TP_ok={tp_ok} TP=LIMIT SL=STOP_MARKET",
                     )
                 except Exception as e:
-                    logger.warning(f"OrderLogger OPEN failed: {e}")
+                    logger.debug(f"order_logger: {e}")
 
             return {
                 "order_id": order_id,
-                "signal": signal.to_dict(),
+                "symbol": signal.symbol,
+                "side": signal.side.value,
                 "size": size,
                 "entry": fill_price,
                 "leverage": leverage,
-                "margin_mode": "isolated",
                 "sl_placed": sl_ok,
                 "tp_placed": tp_ok,
                 "sl_order_id": sl_id,
                 "tp_order_id": tp_id,
-                "status": "FILLED",
             }
         except Exception as e:
-            err = str(e)
-            if "-4411" in err or "TradFi-Perps" in err or "agreement contract" in err.lower():
-                self.skip_symbols.add(signal.symbol)
-                logger.warning(
-                    f"Skip {signal.symbol}: cần ký TradFi-Perps agreement trên Binance."
-                )
-                return None
-
+            err = str(e).lower()
             logger.error(f"Execution failed {signal.symbol}: {e}")
             self.risk_gate.record_api_call(False)
+            if "invalid symbol" in err or "does not have market" in err:
+                self.skip_symbols.add(signal.symbol)
             return None
 
     def _round_amount(self, symbol: str, amount: float) -> float:
         try:
-            if self.exchange.mode != Mode.PAPER and self.exchange.exchange:
-                return float(self.exchange.exchange.amount_to_precision(symbol, amount))
+            markets = getattr(self.exchange.exchange, "markets", None) or {}
+            m = markets.get(symbol) or {}
+            prec = (m.get("precision") or {}).get("amount")
+            if prec is not None:
+                if isinstance(prec, int):
+                    return float(f"{amount:.{prec}f}")
+                step = float(prec)
+                if step > 0:
+                    return (amount // step) * step
         except Exception:
             pass
-        if amount >= 1:
-            return round(amount, 3)
-        if amount >= 0.01:
-            return round(amount, 4)
         return round(amount, 6)
 
-    def _place_protective_orders(
-        self, signal: Signal, size: float, entry_price: float
-    ) -> Tuple[bool, bool, str, str]:
-        """TP/SL ưu tiên lệnh cơ bản LIMIT; SL fallback STOP_MARKET nếu LIMIT bị từ chối.
+    def _normalize_sl_tp(self, signal, fill_price: float):
+        """Đảm bảo SL/TP đúng phía so với giá fill; stop không quá sát."""
+        entry = float(fill_price or signal.entry or 0)
+        sl = float(signal.sl)
+        tp = float(signal.tp)
+        side = signal.side.value if hasattr(signal.side, "value") else str(signal.side)
 
-        - TP: LIMIT reduceOnly @ TP (tab Open Orders)
-        - SL: thử LIMIT reduceOnly @ SL; nếu fail (giá marketable) → STOP_MARKET
-        """
-        if self.exchange.mode == Mode.PAPER:
+        if entry <= 0:
+            return sl, tp, True
+
+        if side == "LONG":
+            if sl >= entry:
+                logger.error(f"Invalid SL for LONG: SL={sl} >= entry={entry}")
+                return sl, tp, False
+            if tp <= entry:
+                logger.warning(f"TP for LONG below entry — check signal TP={tp} entry={entry}")
+        else:
+            if sl <= entry:
+                logger.error(f"Invalid SL for SHORT: SL={sl} <= entry={entry}")
+                return sl, tp, False
+            if tp >= entry:
+                logger.warning(f"TP for SHORT above entry — check signal TP={tp} entry={entry}")
+
+        stop_pct = abs(entry - sl) / entry * 100
+        if stop_pct < 0.15:
+            logger.error(
+                f"SL too tight ({stop_pct:.3f}% < 0.15%) {signal.symbol} — skip protective"
+            )
+            return sl, tp, False
+        return sl, tp, True
+
+    def _place_protective_orders(
+        self, signal, size: float, fill_price: float = None
+    ):
+        """TP = LIMIT; SL = STOP_MARKET only (không LIMIT — tránh khớp ngay)."""
+        if self.exchange.mode.value == "paper":
             logger.info(
-                f"[PAPER] Protective LIMIT | SL={signal.sl:.6f} TP={signal.tp:.6f}"
+                f"[PAPER] Protective | SL={signal.sl:.6f} TP={signal.tp:.6f} "
+                f"(TP=LIMIT SL=STOP_MARKET)"
             )
             key = f"{signal.symbol}_{signal.side.value}"
             if key in self.exchange.paper_positions:
@@ -209,13 +228,17 @@ class ExecutionAgent:
                 self.exchange.paper_positions[key].tp = signal.tp
             return True, True, "paper-sl", "paper-tp"
 
-        close_side = "sell" if signal.side == Side.LONG else "buy"
+        close_side = "sell" if signal.side.value == "LONG" else "buy"
+        fill = float(fill_price or signal.entry)
+        sl_px, tp_px, ok = self._normalize_sl_tp(signal, fill)
+        if not ok:
+            logger.error(f"Protective skipped — invalid SL/TP {signal.symbol}")
+            return False, False, "", ""
+
         sl_ok, tp_ok = False, False
         sl_id, tp_id = "", ""
-        sl_px = float(signal.sl)
-        tp_px = float(signal.tp)
 
-        # --- TP: LIMIT cơ bản (reduceOnly) ---
+        # --- TP: LIMIT reduceOnly ---
         try:
             tp_order = self.exchange.create_order(
                 symbol=signal.symbol,
@@ -223,10 +246,7 @@ class ExecutionAgent:
                 amount=size,
                 price=tp_px,
                 order_type="limit",
-                params={
-                    "reduceOnly": True,
-                    "timeInForce": "GTC",
-                },
+                params={"reduceOnly": True, "timeInForce": "GTC"},
             )
             tp_id = str(tp_order.get("id", ""))
             tp_ok = True
@@ -248,54 +268,36 @@ class ExecutionAgent:
             except Exception as e2:
                 logger.error(f"TP LIMIT retry failed: {e2}")
 
-        # --- SL: LIMIT cơ bản; fallback STOP_MARKET nếu bị reject ---
+        # --- SL: STOP_MARKET only ---
         try:
             sl_order = self.exchange.create_order(
                 symbol=signal.symbol,
                 side=close_side,
                 amount=size,
-                price=sl_px,
-                order_type="limit",
+                order_type="STOP_MARKET",
                 params={
+                    "stopPrice": sl_px,
                     "reduceOnly": True,
-                    "timeInForce": "GTC",
+                    "workingType": "CONTRACT_PRICE",
                 },
             )
             sl_id = str(sl_order.get("id", ""))
             sl_ok = True
-            logger.info(f"SL LIMIT placed {signal.symbol} @ {sl_px}")
+            logger.info(f"SL STOP_MARKET placed {signal.symbol} @ {sl_px}")
         except Exception as e:
-            logger.warning(
-                f"SL LIMIT failed {signal.symbol}: {e} → fallback STOP_MARKET"
-            )
+            logger.warning(f"SL STOP_MARKET failed {signal.symbol}: {e} → retry")
             try:
                 sl_order = self.exchange.create_order(
                     symbol=signal.symbol,
                     side=close_side,
                     amount=size,
                     order_type="STOP_MARKET",
-                    params={
-                        "stopPrice": sl_px,
-                        "reduceOnly": True,
-                        "workingType": "CONTRACT_PRICE",
-                    },
+                    params={"stopPrice": sl_px, "reduceOnly": True},
                 )
                 sl_id = str(sl_order.get("id", ""))
                 sl_ok = True
-                logger.info(f"SL STOP_MARKET fallback placed {signal.symbol} @ {sl_px}")
+                logger.info(f"SL STOP_MARKET retry OK {signal.symbol} @ {sl_px}")
             except Exception as e2:
-                logger.error(f"SL STOP_MARKET fallback failed: {e2}")
-                try:
-                    sl_order = self.exchange.create_order(
-                        symbol=signal.symbol,
-                        side=close_side,
-                        amount=size,
-                        order_type="STOP_MARKET",
-                        params={"stopPrice": sl_px, "reduceOnly": True},
-                    )
-                    sl_id = str(sl_order.get("id", ""))
-                    sl_ok = True
-                except Exception as e3:
-                    logger.error(f"SL final retry failed: {e3}")
+                logger.error(f"SL STOP_MARKET final failed: {e2}")
 
         return sl_ok, tp_ok, sl_id, tp_id
