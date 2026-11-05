@@ -102,6 +102,7 @@ def main():
         timeframes=settings.get("timeframes", ["15m", "1h"]),
         enabled_strategies=enabled,
         strategy_params=settings.get("strategy_params") or {},
+        excluded_symbols=settings.get("excluded_symbols") or [],
     )
     logger.info(f"Active strategies: {[s.name for s in scanner.strategies]}")
 
@@ -189,6 +190,8 @@ def main():
 
             if hasattr(scanner, "top_n"):
                 scanner.top_n = int(settings.get("top_n", scanner.top_n))
+            if hasattr(scanner, "set_excluded_symbols"):
+                scanner.set_excluded_symbols(settings.get("excluded_symbols") or [])
             new_enabled = settings.get("enabled_strategies")
             if new_enabled is not None:
                 current_names = [s.name for s in scanner.strategies]
