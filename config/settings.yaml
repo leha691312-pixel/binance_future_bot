@@ -4,6 +4,9 @@ exchange: binanceusdm
 
 top_n: 50
 scan_interval_seconds: 120
+
+# Symbol không quét (blacklist). VD: BTC, DOGE/USDT:USDT
+excluded_symbols: []
 timeframes: ["15m", "1h", "4h"]
 
 enabled_strategies:
