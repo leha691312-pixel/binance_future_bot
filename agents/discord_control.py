@@ -212,7 +212,7 @@ def create_bot():
     prefix = os.getenv("DISCORD_PREFIX", "!").strip() or "!"
     intents = discord.Intents.default()
     intents.message_content = True
-    bot = commands.Bot(command_prefix=prefix, intents=intents)
+    bot = commands.Bot(command_prefix=prefix, intents=intents, help_command=None)
 
     @bot.event
     async def on_ready():
