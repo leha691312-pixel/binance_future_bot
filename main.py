@@ -84,7 +84,6 @@ def main():
     synced = risk_gate.sync_positions_from_exchange(exchange)
     logger.info(f"Startup sync: {synced} positions")
 
-    # Dọn SL/TP còn treo khi không còn position (ARIA, SOL... trong app)
     try:
         n = exchange.cleanup_orphan_orders()
         if n:
@@ -103,6 +102,8 @@ def main():
         enabled_strategies=enabled,
         strategy_params=settings.get("strategy_params") or {},
         excluded_symbols=settings.get("excluded_symbols") or [],
+        parallel=bool(settings.get("scan_parallel", True)),
+        max_workers=int(settings.get("scan_workers", 8)),
     )
     logger.info(f"Active strategies: {[s.name for s in scanner.strategies]}")
 
@@ -182,7 +183,6 @@ def main():
             invalidated = risk_gate.monitor_invalidations(exchange, order_logger)
             risk_gate.sync_positions_from_exchange(exchange)
 
-            # Hủy SL/TP còn treo khi không còn position
             try:
                 exchange.cleanup_orphan_orders()
             except Exception as e:
@@ -190,6 +190,10 @@ def main():
 
             if hasattr(scanner, "top_n"):
                 scanner.top_n = int(settings.get("top_n", scanner.top_n))
+            if hasattr(scanner, "parallel"):
+                scanner.parallel = bool(settings.get("scan_parallel", scanner.parallel))
+            if hasattr(scanner, "max_workers"):
+                scanner.max_workers = max(1, int(settings.get("scan_workers", scanner.max_workers)))
             if hasattr(scanner, "set_excluded_symbols"):
                 scanner.set_excluded_symbols(settings.get("excluded_symbols") or [])
             new_enabled = settings.get("enabled_strategies")
