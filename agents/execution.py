@@ -1,9 +1,9 @@
 """
 Execution Agent - entry market + TP LIMIT + SL STOP_MARKET
-- Isolated margin + leverage hợp lý
-- ML on_open kèm risk_amount / notional để label R-multiple
-- TP: LIMIT reduceOnly (Open Orders)
-- SL: STOP_MARKET only (LIMIT SL khớp ngay = bug)
+- Isolated margin + leverage
+- ML on_open with risk_amount / notional for R-multiple labels
+- TP: LIMIT reduceOnly
+- SL: STOP_MARKET only (LIMIT SL fills immediately = bug)
 """
 from typing import Optional, Set, Tuple
 from loguru import logger
@@ -124,7 +124,7 @@ class ExecutionAgent:
 
             logger.info(
                 f"EXECUTED {signal.side.value} {signal.symbol} size={size:.6f} lev={leverage}x "
-                f"entry≈{fill_price:.6f} SL={signal.sl:.6f} TP={signal.tp:.6f} "
+                f"entry~={fill_price:.6f} SL={signal.sl:.6f} TP={signal.tp:.6f} "
                 f"strategy={signal.strategy} | margin=ISOLATED | TP=LIMIT SL=STOP_MARKET"
             )
 
@@ -147,6 +147,7 @@ class ExecutionAgent:
                 except Exception as e:
                     logger.debug(f"order_logger: {e}")
 
+            self.risk_gate.record_api_call(True)
             return {
                 "order_id": order_id,
                 "symbol": signal.symbol,
@@ -162,9 +163,23 @@ class ExecutionAgent:
         except Exception as e:
             err = str(e).lower()
             logger.error(f"Execution failed {signal.symbol}: {e}")
-            self.risk_gate.record_api_call(False)
-            if "invalid symbol" in err or "does not have market" in err:
+            soft = any(
+                x in err
+                for x in (
+                    "invalid symbol",
+                    "does not have market",
+                    "invalid symbol status",
+                    "symbol not found",
+                    "market is closed",
+                    "-1122",
+                    "-1121",
+                )
+            )
+            if soft:
                 self.skip_symbols.add(signal.symbol)
+                self.risk_gate.record_api_call(False, count_error=False)
+            else:
+                self.risk_gate.record_api_call(False, count_error=True)
             return None
 
     def _round_amount(self, symbol: str, amount: float) -> float:
@@ -183,7 +198,7 @@ class ExecutionAgent:
         return round(amount, 6)
 
     def _normalize_sl_tp(self, signal, fill_price: float):
-        """Đảm bảo SL/TP đúng phía so với giá fill; stop không quá sát."""
+        """Ensure SL/TP on correct side vs fill; stop not too tight."""
         entry = float(fill_price or signal.entry or 0)
         sl = float(signal.sl)
         tp = float(signal.tp)
@@ -216,7 +231,7 @@ class ExecutionAgent:
     def _place_protective_orders(
         self, signal, size: float, fill_price: float = None
     ):
-        """TP = LIMIT; SL = STOP_MARKET only (không LIMIT — tránh khớp ngay)."""
+        """TP = LIMIT; SL = STOP_MARKET only."""
         if self.exchange.mode.value == "paper":
             logger.info(
                 f"[PAPER] Protective | SL={signal.sl:.6f} TP={signal.tp:.6f} "
@@ -238,7 +253,6 @@ class ExecutionAgent:
         sl_ok, tp_ok = False, False
         sl_id, tp_id = "", ""
 
-        # --- TP: LIMIT reduceOnly ---
         try:
             tp_order = self.exchange.create_order(
                 symbol=signal.symbol,
@@ -268,7 +282,6 @@ class ExecutionAgent:
             except Exception as e2:
                 logger.error(f"TP LIMIT retry failed: {e2}")
 
-        # --- SL: STOP_MARKET only ---
         try:
             sl_order = self.exchange.create_order(
                 symbol=signal.symbol,
@@ -285,7 +298,7 @@ class ExecutionAgent:
             sl_ok = True
             logger.info(f"SL STOP_MARKET placed {signal.symbol} @ {sl_px}")
         except Exception as e:
-            logger.warning(f"SL STOP_MARKET failed {signal.symbol}: {e} → retry")
+            logger.warning(f"SL STOP_MARKET failed {signal.symbol}: {e} -> retry")
             try:
                 sl_order = self.exchange.create_order(
                     symbol=signal.symbol,
