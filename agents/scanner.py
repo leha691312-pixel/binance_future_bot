@@ -10,6 +10,7 @@ from loguru import logger
 from core.exchange import ExchangeWrapper
 from agents.strategies import get_all_strategies, list_strategy_names
 from core.models import Signal
+from agents.signal_refine import refine_signals
 
 
 class ScannerAgent:
@@ -23,6 +24,8 @@ class ScannerAgent:
         excluded_symbols: Optional[List[str]] = None,
         parallel: bool = True,
         max_workers: int = 8,
+        refine_cfg: Optional[Dict[str, Any]] = None,
+        style_map: Optional[Dict[str, str]] = None,
     ):
         self.exchange = exchange
         self.top_n = top_n
@@ -38,11 +41,15 @@ class ScannerAgent:
         self.set_excluded_symbols(excluded_symbols or [])
         self.parallel = bool(parallel)
         self.max_workers = max(1, int(max_workers or 1))
+        self.refine_cfg = dict(refine_cfg or {})
+        self.style_map = dict(style_map or {})
         names = [s.name for s in self.strategies]
         logger.info(
             f"ScannerAgent ready | Top {top_n} | TFs={self.timeframes} | "
             f"parallel={self.parallel} workers={self.max_workers} | "
             f"Excluded={len(self.excluded_symbols)} | "
+            f"refine={self.refine_cfg.get('consensus_enabled', True)}/"
+            f"{self.refine_cfg.get('htf_bias_enabled', True)} | "
             f"Strategies ({len(names)}): {names}"
         )
 
@@ -107,7 +114,6 @@ class ScannerAgent:
         logger.info(f"Strategies reloaded: {[s.name for s in self.strategies]}")
 
     def _scan_one_symbol(self, symbol: str) -> Tuple[List[Signal], Dict[str, pd.DataFrame], Counter]:
-        """Quét 1 symbol × mọi TF/strategy. Thread-safe: không ghi self.last_dfs."""
         local_signals: List[Signal] = []
         local_dfs: Dict[str, pd.DataFrame] = {}
         per_strat: Counter = Counter()
@@ -222,6 +228,18 @@ class ScannerAgent:
             logger.info(f"Found {len(all_signals)} raw signals | by strategy: {detail}")
         else:
             logger.info("Found 0 raw signals")
+
+        if all_signals and self.refine_cfg:
+            try:
+                all_signals = refine_signals(
+                    all_signals,
+                    exchange=self.exchange,
+                    cfg=self.refine_cfg,
+                    df_cache=self.last_dfs,
+                    style_map=self.style_map or None,
+                )
+            except Exception as e:
+                logger.warning(f"signal refine failed (using raw): {e}")
 
         return all_signals
 

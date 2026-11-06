@@ -95,6 +95,15 @@ def main():
     if enabled is not None and len(enabled) == 0:
         enabled = None
 
+    refine_cfg = settings.get("signal_refine") or {
+        "consensus_enabled": True,
+        "min_strategy_agree": 2,
+        "htf_bias_enabled": True,
+        "htf_timeframe": "1h",
+        "htf_ema_fast": 21,
+        "htf_ema_slow": 50,
+    }
+    style_map = (risk_cfg.get("strategy_trade_style") or {}) if risk_cfg else {}
     scanner = ScannerAgent(
         exchange,
         top_n=settings.get("top_n", 20),
@@ -104,6 +113,8 @@ def main():
         excluded_symbols=settings.get("excluded_symbols") or [],
         parallel=bool(settings.get("scan_parallel", True)),
         max_workers=int(settings.get("scan_workers", 8)),
+        refine_cfg=refine_cfg,
+        style_map=style_map,
     )
     logger.info(f"Active strategies: {[s.name for s in scanner.strategies]}")
 
@@ -194,6 +205,8 @@ def main():
                 scanner.parallel = bool(settings.get("scan_parallel", scanner.parallel))
             if hasattr(scanner, "max_workers"):
                 scanner.max_workers = max(1, int(settings.get("scan_workers", scanner.max_workers)))
+            if hasattr(scanner, "refine_cfg") and settings.get("signal_refine") is not None:
+                scanner.refine_cfg = dict(settings.get("signal_refine") or {})
             if hasattr(scanner, "set_excluded_symbols"):
                 scanner.set_excluded_symbols(settings.get("excluded_symbols") or [])
             new_enabled = settings.get("enabled_strategies")
