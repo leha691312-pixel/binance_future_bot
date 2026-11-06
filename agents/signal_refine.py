@@ -1,8 +1,8 @@
 """
-Làm sạch signal sau khi scan:
-1) Consensus – cần ≥ N strategy cùng symbol + side
-2) HTF bias – không vào ngược xu hướng khung lớn (EMA)
-3) (Optional) bias strategy phải cùng hướng với trigger
+Lam sach signal sau khi scan:
+1) Consensus – can >= N strategy cung symbol + side
+2) HTF bias – khong vao nguoc xu huong khung lon (EMA)
+3) (Optional) bias strategy phai cung huong voi trigger
 """
 from __future__ import annotations
 
@@ -187,7 +187,9 @@ def apply_bias_trigger(
 
 
 def _htf_trend(df: pd.DataFrame, ema_fast: int, ema_slow: int) -> Optional[str]:
-    if df is None or len(df) < max(ema_slow, ema_fast) + 2:
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return None
+    if len(df) < max(ema_slow, ema_fast) + 2:
         return None
     close = df["close"].astype(float)
     ef = close.ewm(span=ema_fast, adjust=False).mean()
@@ -221,8 +223,10 @@ def apply_htf_bias(
     for s in signals:
         sym = s.symbol
         if sym not in trend_cache:
-            df = df_cache.get(f"{sym}_{timeframe}") or df_cache.get(sym)
-            if df is None or len(df) < ema_slow + 2:
+            df = df_cache.get(f"{sym}_{timeframe}")
+            if df is None:
+                df = df_cache.get(sym)
+            if df is None or (hasattr(df, "empty") and df.empty) or len(df) < ema_slow + 2:
                 try:
                     ohlcv = exchange.fetch_ohlcv(sym, timeframe, limit=max(120, ema_slow + 30))
                     if ohlcv and len(ohlcv) >= ema_slow:
