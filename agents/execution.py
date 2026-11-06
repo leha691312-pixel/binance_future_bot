@@ -171,8 +171,14 @@ class ExecutionAgent:
                     "invalid symbol status",
                     "symbol not found",
                     "market is closed",
+                    "tradfi",
+                    "agreement contract",
+                    "sign tradfi",
                     "-1122",
                     "-1121",
+                    "-4411",
+                    "-2019",
+                    "-4164",
                 )
             )
             if soft:
@@ -212,18 +218,18 @@ class ExecutionAgent:
                 logger.error(f"Invalid SL for LONG: SL={sl} >= entry={entry}")
                 return sl, tp, False
             if tp <= entry:
-                logger.warning(f"TP for LONG below entry — check signal TP={tp} entry={entry}")
+                logger.warning(f"TP for LONG below entry - check signal TP={tp} entry={entry}")
         else:
             if sl <= entry:
                 logger.error(f"Invalid SL for SHORT: SL={sl} <= entry={entry}")
                 return sl, tp, False
             if tp >= entry:
-                logger.warning(f"TP for SHORT above entry — check signal TP={tp} entry={entry}")
+                logger.warning(f"TP for SHORT above entry - check signal TP={tp} entry={entry}")
 
         stop_pct = abs(entry - sl) / entry * 100
         if stop_pct < 0.15:
             logger.error(
-                f"SL too tight ({stop_pct:.3f}% < 0.15%) {signal.symbol} — skip protective"
+                f"SL too tight ({stop_pct:.3f}% < 0.15%) {signal.symbol} - skip protective"
             )
             return sl, tp, False
         return sl, tp, True
@@ -247,7 +253,7 @@ class ExecutionAgent:
         fill = float(fill_price or signal.entry)
         sl_px, tp_px, ok = self._normalize_sl_tp(signal, fill)
         if not ok:
-            logger.error(f"Protective skipped — invalid SL/TP {signal.symbol}")
+            logger.error(f"Protective skipped - invalid SL/TP {signal.symbol}")
             return False, False, "", ""
 
         sl_ok, tp_ok = False, False
