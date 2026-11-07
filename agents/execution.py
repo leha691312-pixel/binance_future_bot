@@ -4,6 +4,7 @@ Execution Agent - entry market + TP LIMIT + SL STOP_MARKET
 - ML on_open with risk_amount / notional for R-multiple labels
 - TP: LIMIT reduceOnly
 - SL: STOP_MARKET only (LIMIT SL fills immediately = bug)
+- Size clamped to exchange min/max quantity (avoid -4005)
 """
 from typing import Optional, Set, Tuple
 from loguru import logger
@@ -73,12 +74,12 @@ class ExecutionAgent:
 
         size = risk_amount / stop_distance
         max_notional = equity * self.risk_gate.cfg.get("max_position_pct", 0.05) * leverage
-        if size * signal.entry > max_notional:
+        if signal.entry > 0 and size * signal.entry > max_notional:
             size = max_notional / signal.entry
 
-        size = self._round_amount(signal.symbol, size)
-        if size <= 0:
-            logger.error(f"Size too small after rounding: {size}")
+        size = self._clamp_amount(signal.symbol, size, price=float(signal.entry or 0))
+        if size is None or size <= 0:
+            logger.error(f"Size invalid after market limits: {signal.symbol}")
             return None
 
         side = "buy" if signal.side == Side.LONG else "sell"
@@ -179,6 +180,9 @@ class ExecutionAgent:
                     "-4411",
                     "-2019",
                     "-4164",
+                    "-4005",
+                    "greater than max quantity",
+                    "max quantity",
                 )
             )
             if soft:
@@ -188,20 +192,77 @@ class ExecutionAgent:
                 self.risk_gate.record_api_call(False, count_error=True)
             return None
 
-    def _round_amount(self, symbol: str, amount: float) -> float:
+    def _clamp_amount(self, symbol: str, amount: float, price: float = 0.0) -> float:
+        """Round + clamp to exchange min/max quantity & max notional (avoid -4005)."""
         try:
             markets = getattr(self.exchange.exchange, "markets", None) or {}
             m = markets.get(symbol) or {}
+            if not m and hasattr(self.exchange, "exchange") and self.exchange.exchange:
+                try:
+                    m = self.exchange.exchange.market(symbol) or {}
+                except Exception:
+                    m = {}
+
+            limits = (m.get("limits") or {})
+            amt_lim = limits.get("amount") or {}
+            cost_lim = limits.get("cost") or {}
+            min_amt = float(amt_lim.get("min") or 0) or 0.0
+            max_amt = amt_lim.get("max")
+            max_cost = cost_lim.get("max")
+
             prec = (m.get("precision") or {}).get("amount")
+            step = None
             if prec is not None:
                 if isinstance(prec, int):
-                    return float(f"{amount:.{prec}f}")
-                step = float(prec)
-                if step > 0:
-                    return (amount // step) * step
-        except Exception:
-            pass
-        return round(amount, 6)
+                    step = 10 ** (-prec) if prec >= 0 else None
+                else:
+                    try:
+                        step = float(prec)
+                    except (TypeError, ValueError):
+                        step = None
+
+            amount = float(amount or 0)
+            if amount <= 0:
+                return 0.0
+
+            if max_amt is not None:
+                try:
+                    max_amt_f = float(max_amt)
+                    if max_amt_f > 0 and amount > max_amt_f:
+                        logger.warning(
+                            f"Size {amount} > max qty {max_amt_f} for {symbol} -> clamp"
+                        )
+                        amount = max_amt_f
+                except (TypeError, ValueError):
+                    pass
+
+            if price and max_cost is not None:
+                try:
+                    max_cost_f = float(max_cost)
+                    if max_cost_f > 0 and amount * price > max_cost_f:
+                        amount = max_cost_f / price
+                        logger.warning(
+                            f"Size notional > max cost {max_cost_f} for {symbol} -> clamp"
+                        )
+                except (TypeError, ValueError):
+                    pass
+
+            if step and step > 0:
+                amount = (amount // step) * step
+            elif isinstance(prec, int) and prec >= 0:
+                amount = float(f"{amount:.{prec}f}")
+            else:
+                amount = round(amount, 6)
+
+            if min_amt > 0 and amount < min_amt:
+                logger.error(
+                    f"Size {amount} < min qty {min_amt} for {symbol} - skip"
+                )
+                return 0.0
+            return amount
+        except Exception as e:
+            logger.debug(f"_clamp_amount {symbol}: {e}")
+            return round(float(amount or 0), 6)
 
     def _normalize_sl_tp(self, signal, fill_price: float):
         """Ensure SL/TP on correct side vs fill; stop not too tight."""
