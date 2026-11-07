@@ -11,6 +11,7 @@ Dùng: !panel  (hoặc !menu / !ui)
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Set, Tuple
@@ -215,6 +216,49 @@ def _format_excluded_msg() -> str:
     lines = "\n".join(f"• `{s}`" for s in items[:40])
     more = f"\n… +{len(items) - 40}" if len(items) > 40 else ""
     return f"🚫 **Blacklist ({len(items)}):**\n{lines}{more}"
+
+
+def _repo_root() -> Path:
+    """Thư mục gốc repo (chứa main.py, .git)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _git_pull() -> Tuple[bool, str]:
+    """git pull --ff-only trong thư mục bot. Trả về (ok, log)."""
+    root = _repo_root()
+    if not (root / ".git").exists():
+        return False, f"Không thấy .git tại `{root}` — bot chưa clone bằng git?"
+    try:
+        r = subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "main"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+        out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+        if r.returncode != 0:
+            # fallback: git pull không chỉ định remote/branch
+            r2 = subprocess.run(
+                ["git", "pull", "--ff-only"],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+            out2 = ((r2.stdout or "") + "\n" + (r2.stderr or "")).strip()
+            if r2.returncode == 0:
+                return True, out2[:1500] or "Already up to date."
+            return False, (out2 or out or f"exit {r2.returncode}")[:1500]
+        return True, (out or "Already up to date.")[:1500]
+    except FileNotFoundError:
+        return False, "Không tìm thấy lệnh `git` trên máy bot."
+    except subprocess.TimeoutExpired:
+        return False, "git pull timeout (>120s)."
+    except Exception as e:
+        return False, str(e)[:500]
 
 
 
@@ -532,6 +576,50 @@ if HAS_DISCORD:
                 content="Đã hủy restart.", embed=None, view=None
             )
 
+    class ConfirmPullRestartView(discord.ui.View):
+        """git pull rồi restart process."""
+
+        def __init__(self):
+            super().__init__(timeout=60)
+
+        @discord.ui.button(
+            label="Pull & Restart", style=discord.ButtonStyle.danger, emoji="📥"
+        )
+        async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            await interaction.response.defer(ephemeral=True)
+            ok, log = _git_pull()
+            logger.info(f"Discord git pull ok={ok} | {log[:300]}")
+            if not ok:
+                emb = discord.Embed(
+                    title="❌ git pull thất bại",
+                    description=f"```\n{log}\n```\nBot **không** restart. Xử lý conflict trên máy bot rồi thử lại.",
+                    color=COLOR_DANGER,
+                )
+                await interaction.followup.send(embed=emb, ephemeral=True)
+                return
+            control_state.request_restart = True
+            emb = discord.Embed(
+                title="📥 Pull OK — đang Restart",
+                description=(
+                    f"```\n{log}\n```\n"
+                    "Bot sẽ **khởi động lại** trong vài giây.\n"
+                    "Vị thế trên sàn **không** bị đóng."
+                ),
+                color=COLOR_OK,
+            )
+            await interaction.followup.send(embed=emb, ephemeral=True)
+            logger.warning(f"Discord pull+restart by user {interaction.user.id}")
+
+        @discord.ui.button(label="Hủy", style=discord.ButtonStyle.secondary)
+        async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            await interaction.response.edit_message(
+                content="Đã hủy pull.", embed=None, view=None
+            )
+
     class ExcludeSymbolModal(discord.ui.Modal):
         """Modal nhập symbol để thêm vào blacklist (không quét)."""
 
@@ -822,6 +910,26 @@ if HAS_DISCORD:
                 embed=emb, view=ConfirmRestartView(), ephemeral=True
             )
 
+        @discord.ui.button(
+            label="Pull & Restart", style=discord.ButtonStyle.danger, emoji="📥", row=4
+        )
+        async def btn_pull_restart(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            emb = discord.Embed(
+                title="⚠️ Xác nhận Pull & Restart",
+                description=(
+                    "Bot sẽ chạy **`git pull`** từ GitHub rồi **restart** process.\n"
+                    "• Cần máy bot đã `git clone` repo và có mạng\n"
+                    "• Vị thế trên sàn **không** bị đóng\n"
+                    "• Nếu pull conflict → **không** restart, báo lỗi tại đây"
+                ),
+                color=COLOR_WARN,
+            )
+            await interaction.response.send_message(
+                embed=emb, view=ConfirmPullRestartView(), ephemeral=True
+            )
+
 
 def create_bot() -> Optional[Any]:
     if not HAS_DISCORD:
@@ -874,10 +982,11 @@ def create_bot() -> Optional[Any]:
                 f"`{prefix}pause` · `{prefix}resume`\n"
                 f"`{prefix}kill` · `{prefix}unkill`\n"
                 f"`{prefix}restart` — khởi động lại bot (có xác nhận)\n"
+                f"`{prefix}pull` — git pull + restart (có xác nhận)\n"
                 f"`{prefix}skip clear`\n"
                 f"`{prefix}exclude list|add|remove|clear`\n\n"
-                "**Trên panel:** 🚫 Loại symbol · 📋 Xem blacklist · "
-                "♻️ Xóa blacklist · 🔁 Restart bot"
+                "**Trên panel:** 🚫 Loại symbol · 📋 Blacklist · "
+                "🔁 Restart · 📥 Pull & Restart"
             ),
             color=COLOR_INFO,
         )
@@ -965,6 +1074,22 @@ def create_bot() -> Optional[Any]:
             color=COLOR_WARN,
         )
         await ctx.send(embed=emb, view=ConfirmRestartView())
+
+    @bot.command(name="pull")
+    async def cmd_pull(ctx):
+        if not _is_authorized(ctx):
+            await ctx.send("⛔ Không có quyền.", delete_after=10)
+            return
+        emb = discord.Embed(
+            title="⚠️ Xác nhận Pull & Restart",
+            description=(
+                "Bot sẽ **`git pull`** từ GitHub rồi **restart**.\n"
+                "Vị thế trên sàn **không** bị đóng.\n"
+                "Conflict → không restart, báo lỗi."
+            ),
+            color=COLOR_WARN,
+        )
+        await ctx.send(embed=emb, view=ConfirmPullRestartView())
 
     @bot.command(name="skip")
     async def cmd_skip(ctx, action: str = None):
