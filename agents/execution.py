@@ -106,10 +106,11 @@ class ExecutionAgent:
 
             if self.ml_agent is not None:
                 try:
-                    df = (
-                        self.ohlcv_cache.get(signal.symbol)
-                        or self.ohlcv_cache.get(f"{signal.symbol}_{getattr(signal, 'timeframe', '')}")
-                    )
+                    df = self.ohlcv_cache.get(signal.symbol)
+                    if df is None:
+                        df = self.ohlcv_cache.get(
+                            f"{signal.symbol}_{getattr(signal, 'timeframe', '')}"
+                        )
                     actual_risk = abs(fill_price - float(signal.sl)) * size
                     notional = size * fill_price
                     self.ml_agent.on_open(
