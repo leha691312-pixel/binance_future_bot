@@ -372,6 +372,34 @@ def _status_embed() -> "discord.Embed":
     return emb
 
 
+def _lookup_position_meta(symbol: str, side: str) -> dict:
+    """Lấy strategy / trade_style từ RiskGate (lệnh bot mở)."""
+    st = control_state
+    rg = st.risk_gate
+    if not rg:
+        return {}
+    side_u = (side or "").upper()
+    key = f"{symbol}_{side_u}"
+    pos = (rg.open_positions or {}).get(key)
+    if pos is None:
+        # fallback: match symbol only
+        for k, p in (rg.open_positions or {}).items():
+            if str(k).startswith(str(symbol) + "_"):
+                pos = p
+                break
+    if pos is None:
+        return {}
+    strategy = getattr(pos, "strategy", None) or ""
+    style = getattr(pos, "trade_style", None) or ""
+    if not style and strategy and hasattr(rg, "resolve_trade_style"):
+        try:
+            style = rg.resolve_trade_style(strategy, getattr(pos, "timeframe", "") or "")
+        except Exception:
+            style = ""
+    tf = getattr(pos, "timeframe", None) or ""
+    return {"strategy": strategy, "trade_style": style, "timeframe": tf}
+
+
 def _positions_embed() -> "discord.Embed":
     st = control_state
     emb = discord.Embed(title="📈 Vị thế đang mở", color=COLOR_INFO, timestamp=datetime.now(timezone.utc))
@@ -396,15 +424,28 @@ def _positions_embed() -> "discord.Embed":
         side = p.side.value if hasattr(p.side, "value") else str(p.side)
         upnl = float(getattr(p, "unrealized_pnl", 0) or 0)
         total_upnl += upnl
-        flag = "🟢" if side.upper() == "LONG" else "🔴"
+        flag = "🟢" if str(side).upper() == "LONG" else "🔴"
+        meta = _lookup_position_meta(getattr(p, "symbol", ""), side)
+        # strategy từ exchange object (hiếm) hoặc RiskGate
+        strategy = (
+            meta.get("strategy")
+            or getattr(p, "strategy", None)
+            or "—"
+        )
+        style = meta.get("trade_style") or getattr(p, "trade_style", None) or ""
+        tf = meta.get("timeframe") or getattr(p, "timeframe", None) or ""
+        strat_s = str(strategy) if strategy else "—"
+        style_s = f" · `{style}`" if style else ""
+        tf_s = f" · `{tf}`" if tf else ""
         lines.append(
             f"{flag} `{p.symbol}` **{side}** size=`{p.size}`\n"
+            f"　strategy **`{strat_s}`**{style_s}{tf_s}\n"
             f"　entry `{p.entry_price:.6g}` · uPnL `{upnl:+.4f}`"
         )
-    emb.description = "\n".join(lines)
+    emb.description = "\n".join(lines)[:4000]
     emb.add_field(name="Tổng uPnL", value=f"`{total_upnl:+.4f}`", inline=True)
     emb.add_field(name="Số lệnh", value=f"`{len(positions)}`", inline=True)
-    emb.set_footer(text="Tối đa 20 dòng")
+    emb.set_footer(text="Strategy lấy từ RiskGate · tối đa 20 dòng")
     return emb
 
 
