@@ -53,6 +53,7 @@ strategy_trade_style:
   SwingRSI: swing
   FibPullback: swing
   BBSqueeze: swing
+  PremiumDiscount: day
 
 force_paper_on_startup: true
 require_manual_confirm_live: true

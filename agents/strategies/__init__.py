@@ -18,6 +18,7 @@ from .swing_ma_cross import SwingMACrossStrategy
 from .swing_rsi import SwingRSIStrategy
 from .fib_pullback import FibPullbackStrategy
 from .bb_squeeze import BBSqueezeStrategy
+from .premium_discount import PremiumDiscountStrategy
 from .base import BaseStrategy
 
 STRATEGY_MAP = {
@@ -41,6 +42,7 @@ STRATEGY_MAP = {
     "SwingRSI": SwingRSIStrategy,
     "FibPullback": FibPullbackStrategy,
     "BBSqueeze": BBSqueezeStrategy,
+    "PremiumDiscount": PremiumDiscountStrategy,
 }
 
 STRATEGY_ALIASES = {
@@ -96,6 +98,10 @@ STRATEGY_ALIASES = {
     "fibpullback": "FibPullback",
     "bb_squeeze": "BBSqueeze",
     "bbsqueeze": "BBSqueeze",
+    "premium_discount": "PremiumDiscount",
+    "premiumdiscount": "PremiumDiscount",
+    "premium": "PremiumDiscount",
+    "discount": "PremiumDiscount",
     "squeeze": "BBSqueeze",
 }
 

@@ -33,6 +33,7 @@ enabled_strategies:
   - SwingRSI
   - FibPullback
   - BBSqueeze
+  - PremiumDiscount
 
 strategy_params:
   ORB: {range_bars: 4, rr: 2.0}
@@ -54,6 +55,7 @@ strategy_params:
   SwingRSI: {rsi_period: 14, rr: 2.2}
   FibPullback: {lookback: 60, rr: 2.5}
   BBSqueeze: {bb_period: 20, squeeze_lookback: 20, rr: 2.5}
+  PremiumDiscount: {lookback: 50, discount_max: 0.35, premium_min: 0.65, rr: 2.0, require_rejection: true}
 
 # --- Làm sạch signal: consensus + HTF ---
 signal_refine:
