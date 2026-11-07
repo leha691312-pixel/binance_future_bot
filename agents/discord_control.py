@@ -49,6 +49,7 @@ ALLOWED_SETTINGS_KEYS = {
     "scan_interval_seconds": (int, 30, 600),
 }
 
+# Nhãn tiếng Việt cho select / modal
 PARAM_LABELS = {
     "default_leverage": ("Đòn bẩy mặc định", "1–20"),
     "max_leverage": ("Đòn bẩy tối đa", "1–50"),
@@ -82,6 +83,7 @@ class BotControlState:
         self.mode: str = "paper"
         self.paused: bool = False
         self.running: bool = True
+        self.request_restart: bool = False
         self.last_cycle_info: str = ""
         self.scanner = None
 
@@ -215,7 +217,9 @@ def _format_excluded_msg() -> str:
     return f"🚫 **Blacklist ({len(items)}):**\n{lines}{more}"
 
 
+
 def _snapshot() -> Dict[str, Any]:
+    """Lấy snapshot trạng thái an toàn."""
     st = control_state
     rg = st.risk_gate
     equity = float(getattr(rg, "equity", 0) or 0) if rg else 0.0
@@ -459,6 +463,10 @@ def _apply_param(key: str, value: str) -> str:
     return f"❌ Key `{key}` không được phép."
 
 
+# ---------------------------------------------------------------------------
+# Views
+# ---------------------------------------------------------------------------
+
 if HAS_DISCORD:
 
     class ConfirmKillView(discord.ui.View):
@@ -488,6 +496,87 @@ if HAS_DISCORD:
             await interaction.response.edit_message(
                 content="Đã hủy kill.", embed=None, view=None
             )
+
+    class ConfirmRestartView(discord.ui.View):
+        """Xác nhận restart bot (không flatten vị thế)."""
+
+        def __init__(self):
+            super().__init__(timeout=45)
+
+        @discord.ui.button(
+            label="Xác nhận RESTART", style=discord.ButtonStyle.danger, emoji="🔁"
+        )
+        async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            control_state.request_restart = True
+            emb = discord.Embed(
+                title="🔁 Restart đã yêu cầu",
+                description=(
+                    "Bot sẽ **khởi động lại process** trong vài giây.\n"
+                    "Vị thế trên sàn **không** bị đóng.\n"
+                    "Discord có thể mất kết nối tạm rồi online lại."
+                ),
+                color=COLOR_WARN,
+            )
+            await interaction.response.edit_message(content=None, embed=emb, view=None)
+            logger.warning(
+                f"Discord restart requested by user {interaction.user.id}"
+            )
+
+        @discord.ui.button(label="Hủy", style=discord.ButtonStyle.secondary)
+        async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            await interaction.response.edit_message(
+                content="Đã hủy restart.", embed=None, view=None
+            )
+
+    class ExcludeSymbolModal(discord.ui.Modal):
+        """Modal nhập symbol để thêm vào blacklist (không quét)."""
+
+        def __init__(self):
+            super().__init__(title="Loại symbol khỏi scan")
+            self.symbols_input = discord.ui.TextInput(
+                label="Symbol (cách nhau bằng dấu cách)",
+                placeholder="BTC DOGE PEPE  hoặc  BTC/USDT:USDT",
+                required=True,
+                max_length=200,
+                style=discord.TextStyle.short,
+            )
+            self.add_item(self.symbols_input)
+
+        async def on_submit(self, interaction: discord.Interaction):
+            if not _user_authorized(interaction.user.id):
+                await interaction.response.send_message("⛔ Không có quyền.", ephemeral=True)
+                return
+            raw = str(self.symbols_input.value or "").strip()
+            parts = [p for p in raw.replace(",", " ").split() if p.strip()]
+            if not parts:
+                await interaction.response.send_message(
+                    "❌ Chưa nhập symbol nào.", ephemeral=True
+                )
+                return
+            current = list(_get_excluded_list())
+            added = []
+            for p in parts:
+                n = _normalize_symbol(p)
+                if n and n not in current:
+                    current.append(n)
+                    added.append(n)
+            _persist_excluded(current)
+            if added:
+                msg = (
+                    f"✅ Đã loại **{len(added)}** symbol khỏi scan:\n"
+                    + "\n".join(f"• `{s}`" for s in added)
+                    + f"\n\n{_format_excluded_msg()}"
+                )
+                color = COLOR_OK
+            else:
+                msg = f"ℹ️ Symbol đã có trong blacklist.\n\n{_format_excluded_msg()}"
+                color = COLOR_INFO
+            emb = discord.Embed(description=msg[:4000], color=color)
+            await interaction.response.send_message(embed=emb, ephemeral=True)
 
     class ParamSelect(discord.ui.Select):
         def __init__(self):
@@ -555,11 +644,14 @@ if HAS_DISCORD:
             await interaction.response.send_message(embed=emb, ephemeral=True)
 
     class ControlPanelView(discord.ui.View):
+        """Panel chính – timeout 30 phút."""
+
         def __init__(self):
             super().__init__(timeout=1800)
             self.add_item(ParamSelect())
 
         async def on_timeout(self):
+            # Không edit được message ở đây dễ dàng không có ref; user gõ !panel lại
             pass
 
         async def _refresh_panel(self, interaction: discord.Interaction):
@@ -587,49 +679,80 @@ if HAS_DISCORD:
                 return
             await interaction.response.send_message(embed=_positions_embed(), ephemeral=True)
 
-        @discord.ui.button(label="Pause", style=discord.ButtonStyle.secondary, emoji="⏸", row=1)
-        async def btn_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if not await _check_interaction(interaction):
-                return
-            control_state.paused = True
-            await interaction.response.edit_message(embed=_panel_embed(), view=ControlPanelView())
-
-        @discord.ui.button(label="Resume", style=discord.ButtonStyle.success, emoji="▶️", row=1)
-        async def btn_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if not await _check_interaction(interaction):
-                return
-            control_state.paused = False
-            await interaction.response.edit_message(embed=_panel_embed(), view=ControlPanelView())
-
-        @discord.ui.button(label="Kill", style=discord.ButtonStyle.danger, emoji="🛑", row=1)
-        async def btn_kill(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if not await _check_interaction(interaction):
-                return
-            await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="⚠️ Xác nhận Kill",
-                    description="Bật kill = flatten + dừng.",
-                    color=COLOR_DANGER,
-                ),
-                view=ConfirmKillView(),
-                ephemeral=True,
-            )
-
-        @discord.ui.button(label="Unkill", style=discord.ButtonStyle.primary, emoji="✅", row=2)
-        async def btn_unkill(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if not await _check_interaction(interaction):
-                return
-            if control_state.risk_gate:
-                control_state.risk_gate.reset_kill_switch()
-            await interaction.response.edit_message(embed=_panel_embed(), view=ControlPanelView())
-
-        @discord.ui.button(label="Params", style=discord.ButtonStyle.secondary, emoji="⚙️", row=2)
+        @discord.ui.button(label="Thông số", style=discord.ButtonStyle.secondary, emoji="⚙️", row=0)
         async def btn_params(self, interaction: discord.Interaction, button: discord.ui.Button):
             if not await _check_interaction(interaction):
                 return
             await interaction.response.send_message(embed=_params_embed(), ephemeral=True)
 
-        @discord.ui.button(label="Xóa skip", style=discord.ButtonStyle.secondary, emoji="🧹", row=2)
+        @discord.ui.button(label="Tạm dừng", style=discord.ButtonStyle.secondary, emoji="⏸", row=1)
+        async def btn_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            control_state.paused = True
+            await interaction.response.edit_message(
+                embed=_panel_embed(), view=ControlPanelView()
+            )
+
+        @discord.ui.button(label="Tiếp tục", style=discord.ButtonStyle.success, emoji="▶️", row=1)
+        async def btn_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            control_state.paused = False
+            await interaction.response.edit_message(
+                embed=_panel_embed(), view=ControlPanelView()
+            )
+
+        @discord.ui.button(label="Kill", style=discord.ButtonStyle.danger, emoji="🛑", row=1)
+        async def btn_kill(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            emb = discord.Embed(
+                title="⚠️ Xác nhận Kill",
+                description=(
+                    "Bật kill switch sẽ **flatten** vị thế và dừng bot.\n"
+                    "Chỉ bấm xác nhận nếu bạn chắc chắn."
+                ),
+                color=COLOR_DANGER,
+            )
+            await interaction.response.send_message(
+                embed=emb, view=ConfirmKillView(), ephemeral=True
+            )
+
+        @discord.ui.button(label="Gỡ Kill", style=discord.ButtonStyle.success, emoji="✅", row=1)
+        async def btn_unkill(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            if control_state.risk_gate:
+                control_state.risk_gate.reset_kill_switch()
+            await interaction.response.edit_message(
+                embed=_panel_embed(), view=ControlPanelView()
+            )
+
+        @discord.ui.button(label="Lev 3x", style=discord.ButtonStyle.secondary, row=2)
+        async def btn_lev3(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            msg = _apply_param("default_leverage", "3")
+            await interaction.response.send_message(msg, ephemeral=True)
+
+        @discord.ui.button(label="Lev 5x", style=discord.ButtonStyle.secondary, row=2)
+        async def btn_lev5(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            msg = _apply_param("default_leverage", "5")
+            await interaction.response.send_message(msg, ephemeral=True)
+
+        @discord.ui.button(label="Lev 10x", style=discord.ButtonStyle.secondary, row=2)
+        async def btn_lev10(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            msg = _apply_param("default_leverage", "10")
+            await interaction.response.send_message(msg, ephemeral=True)
+
+        @discord.ui.button(
+            label="Xóa skip", style=discord.ButtonStyle.secondary, emoji="🧹", row=2
+        )
         async def btn_skip(self, interaction: discord.Interaction, button: discord.ui.Button):
             if not await _check_interaction(interaction):
                 return
@@ -641,17 +764,73 @@ if HAS_DISCORD:
                     f"🧹 Đã xóa **{n}** symbol khỏi skip list.", ephemeral=True
                 )
             else:
-                await interaction.response.send_message("Executor chưa sẵn sàng.", ephemeral=True)
+                await interaction.response.send_message(
+                    "Executor chưa sẵn sàng.", ephemeral=True
+                )
+
+        # ---- Row 4: blacklist + restart ----
+        @discord.ui.button(
+            label="Loại symbol", style=discord.ButtonStyle.secondary, emoji="🚫", row=4
+        )
+        async def btn_exclude(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            await interaction.response.send_modal(ExcludeSymbolModal())
+
+        @discord.ui.button(
+            label="Xem blacklist", style=discord.ButtonStyle.secondary, emoji="📋", row=4
+        )
+        async def btn_exclude_list(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            emb = discord.Embed(
+                title="Blacklist (không quét)",
+                description=_format_excluded_msg(),
+                color=COLOR_INFO,
+            )
+            await interaction.response.send_message(embed=emb, ephemeral=True)
+
+        @discord.ui.button(
+            label="Xóa blacklist", style=discord.ButtonStyle.secondary, emoji="♻️", row=4
+        )
+        async def btn_exclude_clear(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            _persist_excluded([])
+            await interaction.response.send_message(
+                "✅ Đã xóa toàn bộ blacklist — bot quét lại top_n.",
+                ephemeral=True,
+            )
+
+        @discord.ui.button(
+            label="Restart bot", style=discord.ButtonStyle.danger, emoji="🔁", row=4
+        )
+        async def btn_restart(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not await _check_interaction(interaction):
+                return
+            emb = discord.Embed(
+                title="⚠️ Xác nhận Restart",
+                description=(
+                    "Bot sẽ **tắt process và chạy lại** (load code/config mới).\n"
+                    "• Vị thế trên sàn **không** bị đóng\n"
+                    "• Discord offline vài giây rồi online lại\n"
+                    "Chỉ dùng khi cần nạp lại code sau `git pull`."
+                ),
+                color=COLOR_WARN,
+            )
+            await interaction.response.send_message(
+                embed=emb, view=ConfirmRestartView(), ephemeral=True
+            )
 
 
 def create_bot() -> Optional[Any]:
     if not HAS_DISCORD:
-        logger.warning("discord.py not installed — Discord control disabled")
+        logger.warning("discord.py not installed – Discord control disabled")
         return None
 
     token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
     if not token:
-        logger.info("DISCORD_BOT_TOKEN not set — Discord control off")
+        logger.info("DISCORD_BOT_TOKEN not set – Discord control disabled")
         return None
 
     prefix = os.getenv("DISCORD_PREFIX", "!").strip() or "!"
@@ -694,8 +873,11 @@ def create_bot() -> Optional[Any]:
                 f"`{prefix}set <key> <value>`\n"
                 f"`{prefix}pause` · `{prefix}resume`\n"
                 f"`{prefix}kill` · `{prefix}unkill`\n"
+                f"`{prefix}restart` — khởi động lại bot (có xác nhận)\n"
                 f"`{prefix}skip clear`\n"
-                f"`{prefix}exclude list|add|remove|clear`"
+                f"`{prefix}exclude list|add|remove|clear`\n\n"
+                "**Trên panel:** 🚫 Loại symbol · 📋 Xem blacklist · "
+                "♻️ Xóa blacklist · 🔁 Restart bot"
             ),
             color=COLOR_INFO,
         )
@@ -768,6 +950,21 @@ def create_bot() -> Optional[Any]:
         if control_state.risk_gate:
             control_state.risk_gate.reset_kill_switch()
         await ctx.send("✅ Kill switch **OFF**.")
+
+    @bot.command(name="restart")
+    async def cmd_restart(ctx):
+        if not _is_authorized(ctx):
+            await ctx.send("⛔ Không có quyền.", delete_after=10)
+            return
+        emb = discord.Embed(
+            title="⚠️ Xác nhận Restart",
+            description=(
+                "Bot sẽ tắt process và chạy lại.\n"
+                "Vị thế trên sàn **không** bị đóng."
+            ),
+            color=COLOR_WARN,
+        )
+        await ctx.send(embed=emb, view=ConfirmRestartView())
 
     @bot.command(name="skip")
     async def cmd_skip(ctx, action: str = None):

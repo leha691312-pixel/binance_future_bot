@@ -2,6 +2,8 @@
 Main Orchestrator - Multi-agent trading bot
 ML: R-label, time-split, collect_only, deploy gate
 """
+import os
+import sys
 import time
 import yaml
 from pathlib import Path
@@ -84,6 +86,7 @@ def main():
     synced = risk_gate.sync_positions_from_exchange(exchange)
     logger.info(f"Startup sync: {synced} positions")
 
+    # Dọn SL/TP còn treo khi không còn position (ARIA, SOL... trong app)
     try:
         n = exchange.cleanup_orphan_orders()
         if n:
@@ -95,15 +98,6 @@ def main():
     if enabled is not None and len(enabled) == 0:
         enabled = None
 
-    refine_cfg = settings.get("signal_refine") or {
-        "consensus_enabled": True,
-        "min_strategy_agree": 2,
-        "htf_bias_enabled": True,
-        "htf_timeframe": "1h",
-        "htf_ema_fast": 21,
-        "htf_ema_slow": 50,
-    }
-    style_map = (risk_cfg.get("strategy_trade_style") or {}) if risk_cfg else {}
     scanner = ScannerAgent(
         exchange,
         top_n=settings.get("top_n", 20),
@@ -111,10 +105,6 @@ def main():
         enabled_strategies=enabled,
         strategy_params=settings.get("strategy_params") or {},
         excluded_symbols=settings.get("excluded_symbols") or [],
-        parallel=bool(settings.get("scan_parallel", True)),
-        max_workers=int(settings.get("scan_workers", 8)),
-        refine_cfg=refine_cfg,
-        style_map=style_map,
     )
     logger.info(f"Active strategies: {[s.name for s in scanner.strategies]}")
 
@@ -161,6 +151,25 @@ def main():
 
     try:
         while True:
+            # Discord / panel yêu cầu restart process
+            if getattr(control_state, "request_restart", False):
+                logger.warning(
+                    "Restart requested (Discord) – re-exec process, positions left open"
+                )
+                control_state.request_restart = False
+                try:
+                    write_status(
+                        mode=mode,
+                        last_error="restart_requested",
+                        kill_switch=risk_gate.kill_switch,
+                        equity=risk_gate.equity,
+                        open_positions=len(risk_gate.open_positions),
+                    )
+                except Exception:
+                    pass
+                time.sleep(1.5)
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+
             if risk_gate.kill_switch:
                 logger.critical("Kill switch active – flattening and pausing")
                 try:
@@ -194,6 +203,7 @@ def main():
             invalidated = risk_gate.monitor_invalidations(exchange, order_logger)
             risk_gate.sync_positions_from_exchange(exchange)
 
+            # Hủy SL/TP còn treo khi không còn position
             try:
                 exchange.cleanup_orphan_orders()
             except Exception as e:
@@ -201,12 +211,6 @@ def main():
 
             if hasattr(scanner, "top_n"):
                 scanner.top_n = int(settings.get("top_n", scanner.top_n))
-            if hasattr(scanner, "parallel"):
-                scanner.parallel = bool(settings.get("scan_parallel", scanner.parallel))
-            if hasattr(scanner, "max_workers"):
-                scanner.max_workers = max(1, int(settings.get("scan_workers", scanner.max_workers)))
-            if hasattr(scanner, "refine_cfg") and settings.get("signal_refine") is not None:
-                scanner.refine_cfg = dict(settings.get("signal_refine") or {})
             if hasattr(scanner, "set_excluded_symbols"):
                 scanner.set_excluded_symbols(settings.get("excluded_symbols") or [])
             new_enabled = settings.get("enabled_strategies")
