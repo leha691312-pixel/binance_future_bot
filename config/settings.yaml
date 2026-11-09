@@ -1,0 +1,88 @@
+# ====================== BOT SETTINGS ======================
+mode: testnet
+exchange: binanceusdm
+
+# isolated | cross
+margin_mode: cross
+
+top_n: 50
+scan_interval_seconds: 120
+
+# Quét song song (nhanh hơn với top_n lớn)
+scan_parallel: true
+scan_workers: 8
+
+# Symbol không quét (blacklist). VD: BTC, DOGE/USDT:USDT
+excluded_symbols: []
+timeframes: ["15m", "1h", "4h"]
+
+enabled_strategies:
+  - ORB
+  - LiquiditySweep
+  - MARibbon
+  - StochBB
+  - PivotScalp
+  - EMARSIScalp
+  - OrderBlock
+  - SupplyDemand
+  - FVG
+  - BOS_CHOCH
+  - TrendMA
+  - MomentumRSI
+  - PullbackEMA
+  - RangeBounce
+  - OI_Funding
+  - SwingMACross
+  - SwingRSI
+  - FibPullback
+  - BBSqueeze
+  - PremiumDiscount
+
+strategy_params:
+  ORB: {range_bars: 4, rr: 2.0}
+  LiquiditySweep: {lookback: 30, rr: 2.0}
+  MARibbon: {sma1: 5, sma2: 8, sma3: 13, rr: 1.8}
+  StochBB: {k_period: 5, d_period: 3, bb_period: 13, bb_std: 3.0, rr: 1.6}
+  PivotScalp: {left: 2, right: 2, rr: 1.6}
+  EMARSIScalp: {ema_fast: 8, ema_slow: 21, rsi_period: 7, rr: 1.5}
+  OrderBlock: {impulse_mult: 2.2, rr: 2.5}
+  SupplyDemand: {rr: 2.0}
+  FVG: {min_gap_pct: 0.001, rr: 2.0}
+  BOS_CHOCH: {rr: 2.0}
+  TrendMA: {ema_fast: 9, ema_slow: 21, adx_period: 14, adx_min: 25, rr: 2.0}
+  MomentumRSI: {rsi_period: 14, adx_min: 20, rr: 2.0}
+  PullbackEMA: {ema_trend: 50, ema_pull: 21, rr: 2.2}
+  RangeBounce: {lookback: 40, adx_max: 22, rr: 1.8}
+  OI_Funding: {rr: 2.0}
+  SwingMACross: {ema_fast: 20, ema_slow: 50, rr: 2.5}
+  SwingRSI: {rsi_period: 14, rr: 2.2}
+  FibPullback: {lookback: 60, rr: 2.5}
+  BBSqueeze: {bb_period: 20, squeeze_lookback: 20, rr: 2.5}
+  PremiumDiscount: {lookback: 50, discount_max: 0.35, premium_min: 0.65, rr: 2.0, require_rejection: true}
+
+# --- Làm sạch signal: consensus + HTF ---
+signal_refine:
+  consensus_enabled: true
+  min_strategy_agree: 2          # cần ≥ 2 strategy cùng symbol+side
+  consensus_same_style: false    # true = chỉ đếm trong cùng scalp/day/swing
+  bias_trigger_enabled: false    # true = cần bias + trigger (siết hơn)
+  htf_bias_enabled: true
+  htf_timeframe: "1h"
+  htf_ema_fast: 21
+  htf_ema_slow: 50
+
+# ML
+ml_model_path: data/models/signal_filter.joblib
+ml_filter_enabled: true
+ml_collect_only: true
+ml_min_samples: 80
+ml_retrain_every_new: 25
+ml_retrain_hours: 12
+ml_min_auc_deploy: 0.55
+ml_min_class_count: 20
+ml_min_r_multiple: 0.25
+ml_prob_threshold: 0.55
+ml_fee_rate: 0.0004
+
+log_file: logs/bot.log
+log_level: INFO

@@ -1,0 +1,59 @@
+# ====================== RISK GATE ======================
+max_position_pct: 0.05
+max_total_exposure_pct: 0.30
+# Tổng tối đa 10 vị thế — không chia quota scalp/day/swing
+max_open_positions: 10
+min_risk_reward: 1.5
+max_daily_loss_pct: 0.03
+max_drawdown_pct: 0.12
+cooldown_seconds: 45
+
+default_leverage: 5
+max_leverage: 10
+
+risk_per_trade_pct: 0.01
+atr_multiplier_sl: 1.5
+
+kill_on_consecutive_losses: 6
+kill_on_api_error_rate: 0.15
+kill_on_high_volatility_atr: 4.0
+
+duplicate_window_seconds: 300
+
+# Invalidation: CHỈ TIMEOUT (max hold theo style)
+# Đã gỡ BOS reverse / ADVERSE_MOVE / LOW_REMAINING_RR
+max_hold_minutes: 720
+
+hold_profiles:
+  scalp:
+    max_hold_minutes: 90
+  day:
+    max_hold_minutes: 720
+  swing:
+    max_hold_minutes: 4320
+
+# Map strategy → style (chỉ để chọn max_hold, không giới hạn số lệnh/style)
+strategy_trade_style:
+  ORB: scalp
+  LiquiditySweep: scalp
+  MARibbon: scalp
+  StochBB: scalp
+  PivotScalp: scalp
+  EMARSIScalp: scalp
+  OrderBlock: day
+  SupplyDemand: day
+  FVG: day
+  BOS_CHOCH: day
+  TrendMA: day
+  MomentumRSI: day
+  PullbackEMA: day
+  RangeBounce: day
+  OI_Funding: swing
+  SwingMACross: swing
+  SwingRSI: swing
+  FibPullback: swing
+  BBSqueeze: swing
+  PremiumDiscount: day
+
+force_paper_on_startup: true
+require_manual_confirm_live: true
