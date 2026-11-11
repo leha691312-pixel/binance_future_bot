@@ -21,6 +21,7 @@ DEFAULT_STYLE = {
     "PivotScalp": "scalp",
     "EMARSIScalp": "scalp",
     "OrderBlock": "day",
+    "PremiumDiscount": "day",
     "SupplyDemand": "day",
     "FVG": "day",
     "BOS_CHOCH": "day",
@@ -43,6 +44,7 @@ DEFAULT_BIAS_STRATEGIES = {
 }
 DEFAULT_TRIGGER_STRATEGIES = {
     "FVG",
+    "PremiumDiscount",
     "OrderBlock",
     "SupplyDemand",
     "PullbackEMA",
